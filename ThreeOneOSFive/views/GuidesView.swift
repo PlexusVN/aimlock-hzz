@@ -51,6 +51,7 @@ struct GuidesView: View {
                     .padding(.top, 8)
                 }
             }
+            .appVideoNavigationSurface()
             .navigationTitle("Hướng dẫn")
             .navigationBarTitleDisplayMode(.inline)
             .tint(AppTheme.ink)

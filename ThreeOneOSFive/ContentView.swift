@@ -5,6 +5,7 @@ struct ContentView: View {
     @Environment(\.appLanguage) private var language
     @Environment(\.horizontalSizeClass) private var horizontalSizeClass
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.hasAppVideoBackground) private var hasAppVideoBackground
     @EnvironmentObject private var patchDraftCoordinator: PatchDraftCoordinator
     @EnvironmentObject private var authManager: AuthManager
     @EnvironmentObject private var appState: AppState
@@ -211,6 +212,8 @@ struct ContentView: View {
                     )
                 }
             }
+            .scrollContentBackground(hasAppVideoBackground ? .hidden : .automatic)
+            .appVideoNavigationSurface()
             .navigationTitle("Aimlock Hzz")
             .navigationSplitViewColumnWidth(min: 210, ideal: 240, max: 300)
         } detail: {

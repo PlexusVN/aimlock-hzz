@@ -19,7 +19,7 @@
     <key>CFBundleShortVersionString</key>
     <string>2.4</string>
     <key>CFBundleVersion</key>
-    <string>37</string>
+    <string>38</string>
     <key>CFBundleDocumentTypes</key>
     <array>
         <dict>
@@ -119,7 +119,7 @@
         <string>fetch</string>
     </array>
     <key>NSLocalNetworkUsageDescription</key>
-    <string>Aimlock Hzz dùng mạng cục bộ để phát host Remote Pairing trên thiết bị và kết nối dịch vụ hệ thống qua LocalDevVPN.</string>
+    <string>Aimlock Hzz dÃ¹ng máº¡ng cá»¥c bá»™ Ä‘á»ƒ phÃ¡t host Remote Pairing trÃªn thiáº¿t bá»‹ vÃ  káº¿t ná»‘i dá»‹ch vá»¥ há»‡ thá»‘ng qua LocalDevVPN.</string>
     <key>NSBonjourServices</key>
     <array>
         <string>_remotepairing-pairable-host._tcp</string>

@@ -6,6 +6,17 @@ enum AppBackgroundVideo: String {
     case login = "login-backgroud"
     case main = "app-backgroud"
 
+    var loopTimeRange: CMTimeRange {
+        switch self {
+        case .login:
+            // The original file has 290 picture frames, followed by 460 black
+            // frames. Loop the picture range without rewriting the MP4 bytes.
+            return CMTimeRange(start: .zero, duration: CMTime(value: 290, timescale: 25))
+        case .main:
+            return .invalid
+        }
+    }
+
     func resourceURL(extension fileExtension: String, poster: Bool = false) -> URL? {
         let name = rawValue + (poster ? "-poster" : "")
         return Bundle.main.url(forResource: name, withExtension: fileExtension, subdirectory: "Backgrounds")
@@ -149,7 +160,7 @@ private struct BackgroundVideoSurface: UIViewRepresentable {
             // them, without any extra transform or scale on the video layer.
             // Differing aspect ratios crop edges rather than adding black bars.
             // The retained looper queues the next pass before the current one ends.
-            let loop = AVPlayerLooper(player: player, templateItem: item)
+            let loop = AVPlayerLooper(player: player, templateItem: item, timeRange: video.loopTimeRange)
             looper = loop
             let selectedGeneration = generation
             loopObservation = loop.observe(\.status, options: [.initial, .new]) { [weak self] loop, _ in

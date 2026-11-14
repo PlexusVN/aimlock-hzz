@@ -29,6 +29,7 @@ struct ProfileView: View {
                 .offset(y: appear || reduceMotion ? 0 : 10)
             }
             .background(MeshBackground())
+            .appVideoNavigationSurface()
             .navigationTitle("Hồ sơ")
             .navigationBarTitleDisplayMode(.inline)
             .tint(AppTheme.gamingText)

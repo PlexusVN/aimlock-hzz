@@ -187,6 +187,91 @@ struct GamingBackdrop: View {
     }
 }
 
+// NavigationStack can retain an opaque UIKit hosting/transition surface even
+// when its SwiftUI page background is Color.clear. Clear only that page's
+// ancestor containers so the single app video stays visible behind the tabs.
+extension View {
+    func appVideoNavigationSurface() -> some View {
+        modifier(AppVideoNavigationSurfaceModifier())
+    }
+}
+
+private struct AppVideoNavigationSurfaceModifier: ViewModifier {
+    @Environment(\.hasAppVideoBackground) private var hasAppVideoBackground
+
+    func body(content: Content) -> some View {
+        content.background {
+            if hasAppVideoBackground {
+                AppVideoNavigationSurfaceClearer()
+                    .frame(width: 0, height: 0)
+                    .allowsHitTesting(false)
+                    .accessibilityHidden(true)
+            }
+        }
+    }
+}
+
+private struct AppVideoNavigationSurfaceClearer: UIViewControllerRepresentable {
+    func makeUIViewController(context: Context) -> SurfaceController {
+        SurfaceController()
+    }
+
+    func updateUIViewController(_ controller: SurfaceController, context: Context) {
+        controller.clearOwningNavigationSurface()
+    }
+
+    final class SurfaceController: UIViewController {
+        override func loadView() {
+            view = UIView()
+            view.backgroundColor = .clear
+            view.isUserInteractionEnabled = false
+        }
+
+        override func didMove(toParent parent: UIViewController?) {
+            super.didMove(toParent: parent)
+            clearOwningNavigationSurface()
+        }
+
+        override func viewWillAppear(_ animated: Bool) {
+            super.viewWillAppear(animated)
+            clearOwningNavigationSurface()
+        }
+
+        override func viewDidAppear(_ animated: Bool) {
+            super.viewDidAppear(animated)
+            clearOwningNavigationSurface()
+        }
+
+        override func viewDidLayoutSubviews() {
+            super.viewDidLayoutSubviews()
+            clearOwningNavigationSurface()
+        }
+
+        func clearOwningNavigationSurface() {
+            guard let navigation = navigationController,
+                  let navigationView = navigation.viewIfLoaded else { return }
+            let boundary = navigation.splitViewController?.viewIfLoaded ?? navigationView
+
+            // Validate the path before changing anything. Never walk beyond
+            // this NavigationStack/SplitView into the app/window, or visit sibling
+            // subviews such as cards, navigation bars and presented sheets.
+            var containers: [UIView] = []
+            var ancestor = viewIfLoaded?.superview
+            while let container = ancestor {
+                containers.append(container)
+                if container === boundary { break }
+                ancestor = container.superview
+            }
+            guard containers.contains(where: { $0 === navigationView }),
+                  containers.last === boundary else { return }
+            for container in containers {
+                if container.backgroundColor != .clear { container.backgroundColor = .clear }
+                if container.isOpaque { container.isOpaque = false }
+            }
+        }
+    }
+}
+
 struct GamingPressButtonStyle: ButtonStyle {
     var scale: CGFloat = 0.975
 

@@ -45,3 +45,7 @@ Server preview hiện dùng `serve-preview.py` với phản hồi HTTP206 byte-r
 ## Thích ứng các màn hình iPhone
 
 Nền native luôn theo `bounds` hiện tại của view, không chọn độ phân giải bằng tên iPhone. Đã đối chiếu tài liệu Apple theo point/pixel và mở rộng kiểm tra browser theo các nhóm màn hình, DPR, viewport thay đổi và màn rộng. Preview dùng toàn viewport trên thiết bị cảm ứng kể cả rộng hơn 520px; desktop giữ khung mô phỏng. Bảng thông số, nguồn và giới hạn kiểm chứng nằm trong [IPHONE_BACKGROUND_LAYOUT.md](IPHONE_BACKGROUND_LAYOUT.md).
+
+## Bản sửa build 38
+
+Kiểm tra từng frame phát hiện nguồn login có đoạn đen sau giây 11,60. Build 38 dùng khoảng phát `[0, 11.60)` cho login và giữ toàn clip main; không sửa file gốc. Đồng thời xử lý lớp hosting/transition UIKit của các tab NavigationStack che nền chính. Các kết quả browser 30s trong tài liệu trước là lịch sử build 37, không chứng minh video luôn có hình. Xem [VIDEO_NATIVE_FIX_38.md](VIDEO_NATIVE_FIX_38.md) cho nguyên nhân và bản sửa.

@@ -40,6 +40,7 @@ struct FeaturesView: View {
                     .animation(.easeOut(duration: reduceMotion ? 0.12 : 0.28), value: contentVisible)
                 }
             }
+            .appVideoNavigationSurface()
             .navigationTitle("Chức năng")
             .navigationBarTitleDisplayMode(.inline)
             .tint(AppTheme.gamingBlueBright)
