@@ -437,18 +437,18 @@ struct FeaturesView: View {
 
     private func recoveryRow(_ item: PatchRecoveryItem) -> some View {
         HStack(spacing: 10) {
-            Image(systemName: item.state == .recoveryRequired ? "exclamationmark.triangle" : "arrow.counterclockwise")
+            Image(systemName: item.state == .recoveryRequired || !item.requestedEnabled ? "exclamationmark.triangle" : "arrow.counterclockwise")
                 .font(.system(size: 16, weight: .semibold))
-                .foregroundStyle(item.state == .recoveryRequired ? AppTheme.statusWarning : AppTheme.gamingText)
+                .foregroundStyle(item.state == .recoveryRequired || !item.requestedEnabled ? AppTheme.statusWarning : AppTheme.gamingText)
                 .frame(width: 26)
             VStack(alignment: .leading, spacing: 4) {
                 Text(userFacingFeatureText(item.title, fallback: "Dữ liệu đã áp dụng"))
                     .font(.system(size: 13, weight: .semibold))
                     .foregroundStyle(AppTheme.gamingText)
                     .fixedSize(horizontal: false, vertical: true)
-                Text(item.state == .recoveryRequired ? "Cần kiểm tra trước khi khôi phục" : "Đang áp dụng")
+                Text(!item.requestedEnabled ? "Chưa khôi phục" : (item.state == .recoveryRequired ? "Cần kiểm tra trước khi khôi phục" : "Đang áp dụng"))
                     .font(.system(size: 10))
-                    .foregroundStyle(item.state == .recoveryRequired ? AppTheme.statusWarning : AppTheme.gamingTextSecondary)
+                    .foregroundStyle(item.state == .recoveryRequired || !item.requestedEnabled ? AppTheme.statusWarning : AppTheme.gamingTextSecondary)
                 Text("Mã \(item.projectID.uuidString.prefix(8))")
                     .font(.system(size: 9, design: .monospaced))
                     .foregroundStyle(AppTheme.gamingTextSecondary)
@@ -479,7 +479,7 @@ struct FeaturesView: View {
     // card, but it cannot recreate an enabled button while its write is active.
     private func togglePatch(_ patch: PatchItem) {
         guard !actionsBlocked else { return }
-        if service.patchApplicationState(patch).requiresRestore {
+        if service.isPatchEnabled(patch) {
             beginRestore(.patch(patch))
             return
         }
@@ -499,6 +499,7 @@ struct FeaturesView: View {
     private func beginRestore(_ target: FeatureRestoreTarget) {
         guard !actionsBlocked else { return }
         Haptics.medium()
+        let requestedRevision = authManager.authenticationRevision
         workingActionID = target.actionID
         actionTask = Task { @MainActor in
             defer { workingActionID = nil; actionTask = nil }
@@ -515,9 +516,11 @@ struct FeaturesView: View {
                     try await restore(target, confirmation: confirmation)
                     showRestoreSuccess()
                 } else {
-                    pendingRestore = FeatureRestoreReview(target: target, confirmation: confirmation)
+                    pendingRestore = FeatureRestoreReview(target: target, confirmation: confirmation,
+                                                          requestedRevision: requestedRevision)
                 }
             } catch {
+                if !(error is CancellationError) { recordOffFailure(target, requestedRevision: requestedRevision) }
                 showFailure(error, title: "Không thể khôi phục")
             }
         }
@@ -536,8 +539,19 @@ struct FeaturesView: View {
                 try await restore(review.target, confirmation: review.confirmation)
                 showRestoreSuccess()
             } catch {
+                if !(error is CancellationError) { recordOffFailure(review.target, requestedRevision: review.requestedRevision) }
                 showFailure(error, title: "Chưa thể khôi phục")
             }
+        }
+    }
+
+    private func recordOffFailure(_ target: FeatureRestoreTarget, requestedRevision: UInt64) {
+        guard !Task.isCancelled, authManager.authenticationRevision == requestedRevision else { return }
+        switch target {
+        case .patch(let patch):
+            service.recordPatchOffFailure(patch, requestedRevision: requestedRevision, auth: authManager)
+        case .recovery(let item):
+            service.recordRecoveryOffFailure(item, requestedRevision: requestedRevision, auth: authManager)
         }
     }
 
@@ -592,6 +606,7 @@ private enum FeatureRestoreTarget {
 private struct FeatureRestoreReview: Identifiable {
     let target: FeatureRestoreTarget
     let confirmation: PatchRestoreConfirmation
+    let requestedRevision: UInt64
     var id: UUID { confirmation.id }
 }
 
@@ -674,13 +689,14 @@ struct PatchCardView: View {
     let actionsBlocked: Bool
     let onToggle: () -> Void
     private var applicationState: PatchApplicationState { service.patchApplicationState(patch) }
-    private var isApplied: Bool { applicationState.requiresRestore }
+    private var isEnabled: Bool { service.isPatchEnabled(patch) }
+    private var needsRecovery: Bool { applicationState.requiresRestore && !isEnabled }
 
     private var stateColor: Color {
-        applicationState == .recoveryRequired ? AppTheme.statusWarning : (isApplied ? AppTheme.statusSuccess : AppTheme.gamingTextSecondary)
+        needsRecovery || applicationState == .recoveryRequired ? AppTheme.statusWarning : (isEnabled ? AppTheme.statusSuccess : AppTheme.gamingTextSecondary)
     }
     private var stateCode: String {
-        applicationState == .recoveryRequired ? "RST" : (isApplied ? "ON" : "OFF")
+        isEnabled ? "ON" : "OFF"
     }
 
     var body: some View {
@@ -698,7 +714,7 @@ struct PatchCardView: View {
                         .padding(.horizontal, 5)
                         .padding(.vertical, 3)
                         .background(stateColor.opacity(0.10), in: RoundedRectangle(cornerRadius: 3, style: .continuous))
-                    Text(applicationState == .recoveryRequired ? "Cần khôi phục" : (isApplied ? "Chức năng đang bật" : "Sẵn sàng"))
+                    Text(needsRecovery ? "Chưa khôi phục" : (applicationState == .recoveryRequired ? "Cần khôi phục" : (isEnabled ? "Chức năng đang bật" : "Sẵn sàng")))
                         .font(.system(size: 10, weight: .medium))
                         .lineLimit(1)
                 }
@@ -710,9 +726,9 @@ struct PatchCardView: View {
         .padding(14)
         .background(AppTheme.gamingSurface, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
         .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous)
-            .stroke(isApplied ? stateColor.opacity(0.45) : AppTheme.gamingBorder, lineWidth: 1))
+            .stroke(applicationState.requiresRestore || isEnabled ? stateColor.opacity(0.45) : AppTheme.gamingBorder, lineWidth: 1))
         .overlay(alignment: .leading) {
-            if isApplied {
+            if applicationState.requiresRestore || isEnabled {
                 RoundedRectangle(cornerRadius: 1)
                     .fill(stateColor)
                     .frame(width: 2)
@@ -765,14 +781,14 @@ struct PatchCardView: View {
             Button(action: onToggle) {
                 ZStack {
                     Capsule()
-                        .fill(isApplied ? AppTheme.gamingText : AppTheme.gamingSurfaceRaised)
+                        .fill(isEnabled ? AppTheme.gamingText : AppTheme.gamingSurfaceRaised)
                         .frame(width: 52, height: 28)
-                        .overlay(Capsule().stroke(isApplied ? AppTheme.gamingText : AppTheme.grey400.opacity(0.45), lineWidth: 1))
+                        .overlay(Capsule().stroke(isEnabled ? AppTheme.gamingText : AppTheme.grey400.opacity(0.45), lineWidth: 1))
                     Circle()
-                        .fill(isApplied ? AppTheme.gamingBackground : AppTheme.gamingText)
+                        .fill(isEnabled ? AppTheme.gamingBackground : AppTheme.gamingText)
                         .frame(width: 22, height: 22)
-                        .offset(x: isApplied ? 11 : -11)
-                    if isApplied {
+                        .offset(x: isEnabled ? 11 : -11)
+                    if isEnabled {
                         Image(systemName: "checkmark")
                             .font(.system(size: 9, weight: .black))
                             .foregroundStyle(AppTheme.gamingText)
@@ -781,14 +797,14 @@ struct PatchCardView: View {
                 }
                 .frame(width: 56, height: 44)
                 .contentShape(Rectangle())
-                .animation(AppTheme.gamingTabSpring, value: isApplied)
+                .animation(AppTheme.gamingTabSpring, value: isEnabled)
             }
             .buttonStyle(GamingPressButtonStyle(scale: 0.97))
             .disabled(actionsBlocked)
             .opacity(actionsBlocked ? 0.5 : 1)
             .accessibilityLabel(userFacingFeatureText(patch.name, fallback: "Chức năng"))
-            .accessibilityValue(applicationState == .recoveryRequired ? "Cần khôi phục" : (isApplied ? "Đang bật" : "Đang tắt"))
-            .accessibilityHint(isApplied ? "Chạm để tắt và khôi phục" : "Chạm để bật")
+            .accessibilityValue(needsRecovery ? "Đang tắt, chưa khôi phục dữ liệu" : (isEnabled ? "Đang bật" : "Đang tắt"))
+            .accessibilityHint(isEnabled ? "Chạm để tắt và khôi phục" : "Chạm để bật")
             .accessibilityIdentifier("patch-toggle-\(patch.downloadIdentity)")
         }
     }

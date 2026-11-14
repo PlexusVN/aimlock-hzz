@@ -19,6 +19,9 @@ METHODS = [
     'private func beginPatchOperation(', 'private func endPatchOperation(',
     'private func recoveryMetadataURL(', 'private func readRecoveryMetadata(',
     'private func saveRecoveryMetadata(', 'func refreshRecoveryItems(',
+    'private func writeRecoveryMetadata(', 'private func setRequestedEnabled(',
+    'private func setProjectRequestedEnabled(', 'func isPatchEnabled(',
+    'private func requestedEnabled(', 'func recordPatchOffFailure(', 'func recordRecoveryOffFailure(',
     'private func clearRestoredAssociations(', 'func isPatchApplied(',
     'func patchApplicationState(', 'private func safeSlug(', 'private func patchStorageSlug(',
 ]
@@ -42,6 +45,8 @@ var recoveryItems:[PatchRecoveryItem]=[]
 var recoveryInventoryError:String?
 var patchOperationInProgress=false
 private var pendingPatchOperations=0
+private var requestedStateOverrides:[String:Bool]=[:]
+private var requestedProjectOverrides:[UUID:Bool]=[:]
 func localPatchURL(_ patch:PatchItem)->URL { Fixture.root.appendingPathComponent("unused-legacy-download") }
 func downloadPatch(_ patch:PatchItem,auth:AuthManager)async throws->URL {
   Fixture.downloads += 1

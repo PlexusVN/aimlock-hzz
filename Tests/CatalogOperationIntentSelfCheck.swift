@@ -2,8 +2,9 @@ import Foundation
 
 enum FeaturePatchError: Error { case notAuthenticated }
 enum PatchEngineStateError: Error { case operationNotHeld }
+enum PatchRestoreError: Error { case confirmationExpired }
 struct PatchItem {}
-struct PatchRestoreConfirmation {}
+struct PatchRestoreConfirmation { let authRevision: UInt64 = 1 }
 
 @MainActor final class AuthManager {
     enum State { case verified, idle }
@@ -26,7 +27,10 @@ struct PatchRestoreConfirmation {}
     // ACTUAL_SESSION_GATE
     private func beginPatchOperation() {}
     private func endPatchOperation() {}
-    private func applyPatchInOperation(_ patch: PatchItem, auth: AuthManager, operationID: UUID) async throws {
+    private func patchStorageSlug(_ patch: PatchItem) -> String { "fixture" }
+    private func setRequestedEnabled(_ value: Bool, identity: String) {}
+    private func applyPatchInOperation(_ patch: PatchItem, auth: AuthManager, operationID: UUID,
+                                       expectedRevision: UInt64) async throws {
         try await PatchFilesystemGate.shared.validate(operationID)
         applied += 1
     }

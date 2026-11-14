@@ -126,8 +126,8 @@ class IntegrationContracts(unittest.TestCase):
         code += merger.split('enum ContainerAccessPolicy {')[0].replace('import Foundation', '')
         code += '\nenum PatchPathValidator {\n' + extract_function(validator, 'static func canonicalBundleIdentifier(') + '\n}\n'
         code += store.split('// BEGIN CONTAINER IDENTITY EVIDENCE', 1)[1].split('// END CONTAINER IDENTITY EVIDENCE', 1)[0]
-        code += '\nenum ContainerStore {\nstatic let discoveryLock = NSLock()\nprivate static var worseQueryResume: [String: (next: UInt64, maximum: UInt64)] = [:]\nstatic let appDataRoot = "/var/mobile/Containers/Data/Application"\n'
-        for signature in ['static func prepareIOS27Access(', 'static func resolveAppContainerForPatch(',
+        code += '\nenum ContainerStore {\nstatic let discoveryLock = NSLock()\nprivate static var worseQueryResume: [String: (next: UInt64, maximum: UInt64)] = [:]\nprivate static var worseQueryGeneralCandidates: [String] = []\nstatic let appDataRoot = "/var/mobile/Containers/Data/Application"\n'
+        for signature in ['static func prepareWorseQueryFilesystemAccess(', 'static func prepareIOS27Access(', 'static func resolveAppContainerForPatch(',
                           'static func isApplicationContainerPath(', 'static func metadataPath(', 'static func readWorseQueryIdentity(']:
             code += extract_function(store, signature).replace('ContainerScanProgress.shared', 'DiscoveryFixture.progress') + '\n'
         code += 'static func resolveAppContainerPath(bundleID: String, allowMetadataScan: Bool = true, retainAccess: Bool = true) -> String? { DiscoveryFixture.legacyCalls += 1; return nil }\n}\n'
@@ -138,6 +138,15 @@ class IntegrationContracts(unittest.TestCase):
             subprocess.run(['swiftc', str(source), str(HELPERS / 'ContainerScanProgress.swift'),
                             str(HELPERS / 'IOS27ContainerPreparation.swift'), str(ROOT / 'Tests/ContainerDiscoverySelfCheck.swift'),
                             '-o', str(binary)], check=True)
+            subprocess.run([str(binary)], check=True)
+
+    @unittest.skipUnless(sys.platform == 'darwin' and shutil.which('swiftc'), 'requires macOS Swift/Combine')
+    def test_actual_general_preparation_cancel_and_late_completion(self):
+        with tempfile.TemporaryDirectory() as folder:
+            binary = Path(folder) / 'general-preparation-races'
+            subprocess.run(['swiftc', '-swift-version', '5', str(HELPERS / 'ContainerScanProgress.swift'),
+                            str(HELPERS / 'IOS27ContainerPreparation.swift'),
+                            str(ROOT / 'Tests/GeneralPreparationRaceSelfCheck.swift'), '-o', str(binary)], check=True)
             subprocess.run([str(binary)], check=True)
 
     @unittest.skipUnless(sys.platform == 'darwin' and shutil.which('swiftc'), 'requires macOS Swift')

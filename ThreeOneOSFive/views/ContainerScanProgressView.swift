@@ -24,13 +24,13 @@ struct ContainerScanProgressView: View {
                         .foregroundColor(AppTheme.gamingBlueBright)
                     VStack(alignment: .leading, spacing: 4) {
                         Text(title).font(.title3.bold())
-                        Text("iOS \(AppInfo.versionTuple.major) · Tìm thư mục ứng dụng")
+                        Text("iOS \(AppInfo.versionTuple.major) · Quét thư mục")
                             .font(.caption).foregroundColor(AppTheme.gamingTextSecondary)
                     }
                     Spacer()
                     if state.phase == .scanning || isPreparing { ProgressView().tint(AppTheme.gamingBlueBright) }
                 }
-                Text(preparationError ?? (preparationReady ? "Đã kiểm tra quyền truy cập thư mục game. Chọn Vào ứng dụng để tiếp tục." : state.phase == .scanning || isPreparing
+                Text(preparationError ?? (preparationReady ? "Đã quét thư mục có thể truy cập. Chọn Vào ứng dụng để tiếp tục; không cần tìm thấy game ở bước này." : state.phase == .scanning || isPreparing
                      ? "Lần đầu có thể mất vài phút hoặc lâu hơn. Giữ Aimlock Hzz ở màn hình này; lần sau sẽ dùng đường dẫn đã lưu nếu còn hợp lệ."
                      : state.detail.isEmpty ? "Chuẩn bị worse_query trước khi vào màn hình Chức năng." : state.detail))
                     .font(.subheadline).foregroundColor(AppTheme.gamingTextSecondary)
@@ -45,7 +45,7 @@ struct ContainerScanProgressView: View {
                         Spacer()
                         Text("\(state.candidates) thư mục · \(state.grants) handle")
                     }.font(.caption).foregroundColor(AppTheme.gamingTextSecondary)
-                    Text("Tỷ lệ theo phạm vi tìm kiếm; có thể kết thúc sớm khi tìm thấy ứng dụng.")
+                    Text("Tỷ lệ theo phạm vi dò hiện tại.")
                         .font(.caption2).foregroundColor(AppTheme.gamingTextSecondary)
                     Text("Đọc được: \(state.readable ?? 0) · Định danh hợp lệ: \(state.identified ?? 0) · Đúng mục tiêu: \(state.matched ?? 0)")
                         .font(.caption2).foregroundColor(AppTheme.gamingTextSecondary)
@@ -142,7 +142,7 @@ struct IOS27PreparationView: View {
                                 .stroke(AppTheme.gamingBorderGradient, lineWidth: 1))
                             .shadow(color: AppTheme.gamingBlue.opacity(0.20), radius: 28, y: 8)
                             .accessibilityLabel("Aimlock Hzz")
-                        Text("ASTRA")
+                        Text("AIMLOCK HZZ")
                             .font(.system(size: 13, weight: .semibold)).tracking(5)
                             .foregroundColor(AppTheme.gamingTextSecondary)
                     }

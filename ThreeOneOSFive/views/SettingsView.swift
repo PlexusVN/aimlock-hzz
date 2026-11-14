@@ -82,7 +82,7 @@ struct SettingsView: View {
                 if ExploitSupportPolicy.currentRequiresWorseQueryPreparation {
                     Section {
                         Button("Xem nhật ký quét thư mục") { showContainerScanHistory = true }
-                        Button("Quét lại quyền truy cập game") { ios27Preparation.reset(forceScan: true) }
+                        Button("Quét lại quyền truy cập thư mục") { ios27Preparation.reset(forceScan: true) }
                     } header: {
                         Text("Quét thư mục iOS \(AppInfo.versionTuple.major)")
                     } footer: {

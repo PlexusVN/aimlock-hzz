@@ -52,14 +52,14 @@ enum DirectPatchExecutor {
     static var store:PatchEngineApplicationStore { PatchEngineApplicationStore(backupRoot:root) }
     static var states:[UUID:PatchApplicationState]=[:], receipts:[UUID:PatchTransactionReceipt]=[:]
     static var downloads=0,applies=0,restores=0
-    static var failApply=false,partialApply=false,changed=false,forcedRestore=false
+    static var failApply=false,partialApply=false,changed=false,forcedRestore=false,failRestore=false,failInspect=false
     static var snapshot=Data([1,2,3]),nextProject=PatchProject()
     static func reset()throws {
         try? FileManager.default.removeItem(at:root)
         try FileManager.default.createDirectory(at:root,withIntermediateDirectories:true)
         for key in defaults.dictionaryRepresentation().keys { defaults.removeObject(forKey:key) }
         states=[:];receipts=[:];downloads=0;applies=0;restores=0
-        failApply=false;partialApply=false;changed=false;forcedRestore=false
+        failApply=false;partialApply=false;changed=false;forcedRestore=false;failRestore=false;failInspect=false
         snapshot=Data([1,2,3]);nextProject=PatchProject()
     }
     static func establish(_ projectID:UUID, state:PatchApplicationState = .applied)throws {
@@ -75,14 +75,19 @@ enum DirectPatchExecutor {
 }
 @MainActor enum PatchProjectLibrary { static func backupRootURL()throws->URL { Fixture.root } }
 @MainActor enum DevicePatchService {
-    static func latestReceipt(projectID:UUID)->PatchTransactionReceipt? { Fixture.receipts[projectID] }
+    static func latestReceipt(projectID:UUID)->PatchTransactionReceipt? {
+        Fixture.states[projectID] == .off ? nil : Fixture.receipts[projectID]
+    }
     static func recordedApplicationState(projectID:UUID)->PatchApplicationState? { Fixture.states[projectID] }
     static func prepareContainers(bundleIDs:[String])async throws->[String:URL] { [:] }
     static func prepareContainers(receipt:PatchTransactionReceipt)async throws->[String:URL] { [:] }
     static func inspectExistingApplication(receipt:PatchTransactionReceipt,project:PatchProject,
-                                           preparedContainers:[String:URL]?)throws->PatchApplicationState { Fixture.states[project.id] ?? .off }
+                                           preparedContainers:[String:URL]?)throws->PatchApplicationState {
+        Fixture.changed ? .recoveryRequired : Fixture.states[project.id] ?? .off
+    }
     static func inspectRestore(receipt:PatchTransactionReceipt,preparedContainers:[String:URL]?)throws->PatchRestoreInspection {
-        PatchRestoreInspection(changedTargets:Fixture.changed ? [PatchTargetChange(bundleID:"com.fixture.app",relativePath:"Documents/file",kind:.modified)]:[],currentStateSnapshot:Fixture.snapshot)
+        if Fixture.failInspect { throw CatalogCheckError.writeFailure }
+        return PatchRestoreInspection(changedTargets:Fixture.changed ? [PatchTargetChange(bundleID:"com.fixture.app",relativePath:"Documents/file",kind:.modified)]:[],currentStateSnapshot:Fixture.snapshot)
     }
     static func apply(project:PatchProject,preparedContainers:[String:URL]?)throws {
         Fixture.applies += 1
@@ -92,6 +97,7 @@ enum DirectPatchExecutor {
     }
     static func restore(receipt:PatchTransactionReceipt,allowChangedTargets:Bool,
                         expectedCurrentState:Data?,preparedContainers:[String:URL])throws {
+        if Fixture.failRestore { throw CatalogCheckError.writeFailure }
         if let expectedCurrentState,expectedCurrentState != Fixture.snapshot {
             throw PatchPackageError.restoreTargetsChanged(["com.fixture.app/Documents/file"])
         }

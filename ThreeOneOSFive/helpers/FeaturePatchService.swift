@@ -10,6 +10,7 @@ struct PatchRecoveryItem: Identifiable, Equatable {
     var id: UUID { projectID }
     let title: String
     let state: PatchApplicationState
+    let requestedEnabled: Bool
 }
 
 struct PatchRestoreConfirmation: Identifiable {
@@ -28,6 +29,7 @@ private struct CatalogRecoveryMetadata: Codable {
     let projectID: UUID
     let title: String
     let catalogIdentity: String
+    var requestedEnabled: Bool? = nil
 }
 
 struct PatchCategory: Identifiable, Codable, Equatable {
@@ -419,6 +421,8 @@ final class FeaturePatchService: ObservableObject {
     @Published private(set) var recoveryInventoryError: String?
     @Published private(set) var patchOperationInProgress = false
     private var pendingPatchOperations = 0
+    private var requestedStateOverrides: [String: Bool] = [:]
+    private var requestedProjectOverrides: [UUID: Bool] = [:]
     private var catalogSyncRevision: UInt64 = 0
     private var nativeSessionToken = ""
     private var nativeSessionExpiresAt: Date?
@@ -604,48 +608,49 @@ final class FeaturePatchService: ObservableObject {
     // MARK: - Apply / Restore
 
     func applyPatch(_ patch: PatchItem, auth: AuthManager) async throws {
+        let requestedIdentity = patchStorageSlug(patch)
+        setRequestedEnabled(false, identity: requestedIdentity)
         guard auth.authState == .verified else { throw FeaturePatchError.notAuthenticated }
         let requestedAuthRevision = auth.authenticationRevision
         beginPatchOperation()
         defer { endPatchOperation() }
-        try await withExclusivePatchOperation { operationID in
+        do { try await withExclusivePatchOperation { operationID in
             // A queued tap belongs to the session that requested it. Logging
             // out and logging in again must not replay that tap under a new key.
             guard auth.authState == .verified,
                   auth.authenticationRevision == requestedAuthRevision else {
                 throw FeaturePatchError.notAuthenticated
             }
-            try await self.applyPatchInOperation(patch, auth: auth, operationID: operationID)
+            try await self.applyPatchInOperation(patch, auth: auth, operationID: operationID,
+                                                  expectedRevision: requestedAuthRevision)
+        } } catch {
+            if !Task.isCancelled, auth.authenticationRevision == requestedAuthRevision {
+                setRequestedEnabled(false, identity: requestedIdentity)
+            }
+            throw error
         }
     }
 
-    private func applyPatchInOperation(_ patch: PatchItem, auth: AuthManager, operationID: UUID) async throws {
+    private func applyPatchInOperation(_ patch: PatchItem, auth: AuthManager, operationID: UUID,
+                                       expectedRevision: UInt64) async throws {
         try await PatchFilesystemGate.shared.validate(operationID)
-        guard auth.authState == .verified else {
+        guard auth.authState == .verified, auth.authenticationRevision == expectedRevision else {
             throw FeaturePatchError.notAuthenticated
         }
 
-        let authRevision = auth.authenticationRevision
+        let authRevision = expectedRevision
         defer { applicationRevision &+= 1; refreshRecoveryItems() }
         let slug = patchStorageSlug(patch)
         let previousProjectID = catalogApplications.projectID(for: slug)
         var associatedProjectID: UUID?
         var stage = PatchOperationStage.download
         do {
-            // A stale/queued ON may outlive its card. Never replace the receipt
-            // of an application that still requires OFF/recovery, even if the
-            // server now publishes a different project ID for this item.
-            guard catalogApplications.state(for: slug, recordedState: {
-                StorageEngineCoordinator.shared.projectApplicationState($0)
-            }) == .off else { throw PatchRestoreError.recoveryRequired }
-            // Preference loss must not permit a second project for an item
-            // whose durable recovery metadata still points at active history.
-            // The metadata supplies identity only; journal/provenance owns state.
-            for previous in try readRecoveryMetadata() where previous.catalogIdentity == slug {
-                if StorageEngineCoordinator.shared.projectApplicationState(previous.projectID)?.requiresRestore == true {
-                    throw PatchRestoreError.recoveryRequired
-                }
-            }
+            // Requested OFF and actual file state are separate. An ON retry
+            // must reuse a verified old receipt or safely restore it first;
+            // it must never capture patched bytes as a fresh baseline.
+            let activeIDs = try activeCatalogProjectIDs(for: slug)
+            guard activeIDs.count <= 1 else { throw PatchRestoreError.recoveryRequired }
+            let activeProjectID = activeIDs.first
             print("[FeaturePatch] applying patch: \(patch.name) (slug: \(patch.slug))")
             // Remove only this catalog item's old reusable download from pre-v2.
             try? FileManager.default.removeItem(at: localPatchURL(patch))
@@ -658,7 +663,7 @@ final class FeaturePatchService: ObservableObject {
             var project = decoded.project
             project.isPrivate = true
             let incomingState = StorageEngineCoordinator.shared.projectApplicationState(project.id)
-            guard incomingState == nil || incomingState == .off else {
+            guard incomingState == nil || incomingState == .off || project.id == activeProjectID else {
                 throw PatchRestoreError.recoveryRequired
             }
             stage = .target
@@ -696,6 +701,49 @@ final class FeaturePatchService: ObservableObject {
             try Task.checkCancellation()
             try NetworkAccessGate.shared.validateGeneration(networkGeneration)
             guard auth.authState == .verified, auth.authenticationRevision == authRevision else { throw FeaturePatchError.notAuthenticated }
+            if let activeProjectID {
+                if project.id == activeProjectID, let oldReceipt = try restoreReceipt(activeProjectID) {
+                    let commitProject = project
+                    let state = try await DirectPatchExecutor.run(validation: {
+                        try NetworkAccessGate.shared.validateGeneration(networkGeneration)
+                        guard auth.authState == .verified, auth.authenticationRevision == authRevision else {
+                            throw FeaturePatchError.notAuthenticated
+                        }
+                    }) {
+                        try DevicePatchService.inspectExistingApplication(receipt: oldReceipt, project: commitProject,
+                                                                           preparedContainers: roots)
+                    }
+                    if state == .applied {
+                        try Task.checkCancellation()
+                        try NetworkAccessGate.shared.validateGeneration(networkGeneration)
+                        guard auth.authState == .verified, auth.authenticationRevision == authRevision else {
+                            throw FeaturePatchError.notAuthenticated
+                        }
+                        // Exact journal/payload/target verification succeeded.
+                        // Re-enable intent while retaining the ORIGINAL receipt.
+                        try saveRecoveryMetadata(projectID: activeProjectID, title: patch.name, identity: slug)
+                        catalogApplications.associate(activeProjectID, with: slug)
+                        catalogApplications.markApplied(slug)
+                        setRequestedEnabled(true, identity: slug)
+                        return
+                    }
+                }
+                // A different revision or incomplete previous application needs
+                // a clean recovery first, under this SAME exclusive operation.
+                // Changed targets still require an explicit fresh review in the
+                // recovery UI; this retry never invents force permission.
+                do {
+                    try await restoreProjectInOperation(activeProjectID, auth: auth, revision: authRevision,
+                        operationID: operationID, confirmation: nil)
+                } catch {
+                    throw PatchRestoreError.retryNeedsRecovery(error.localizedDescription)
+                }
+                try Task.checkCancellation()
+                try NetworkAccessGate.shared.validateGeneration(networkGeneration)
+                guard auth.authState == .verified, auth.authenticationRevision == authRevision else {
+                    throw FeaturePatchError.notAuthenticated
+                }
+            }
             stage = .write
             // Store the verified project association before writing so an app
             // interruption cannot leave a journal that the OFF switch ignores.
@@ -724,6 +772,7 @@ final class FeaturePatchService: ObservableObject {
                 guard auth.authState == .verified, auth.authenticationRevision == authRevision else { throw FeaturePatchError.notAuthenticated }
             }
             catalogApplications.markApplied(slug)
+            setRequestedEnabled(true, identity: slug)
             print("[FeaturePatch] protected patch applied successfully")
         } catch {
             if let associatedProjectID {
@@ -757,6 +806,10 @@ final class FeaturePatchService: ObservableObject {
     }
 
     func restorePatch(_ patch: PatchItem, auth: AuthManager, confirmation: PatchRestoreConfirmation? = nil) async throws {
+        if let confirmation, confirmation.authRevision != auth.authenticationRevision {
+            throw PatchRestoreError.confirmationExpired
+        }
+        setRequestedEnabled(false, identity: patchStorageSlug(patch))
         try await withAuthenticatedPatchOperation(auth: auth) { operationID, revision in
             try await self.restorePatchInOperation(patch, auth: auth, operationID: operationID,
                                                    expectedRevision: revision, confirmation: confirmation)
@@ -764,6 +817,10 @@ final class FeaturePatchService: ObservableObject {
     }
 
     func restoreRecovery(_ item: PatchRecoveryItem, auth: AuthManager, confirmation: PatchRestoreConfirmation? = nil) async throws {
+        if let confirmation, confirmation.authRevision != auth.authenticationRevision {
+            throw PatchRestoreError.confirmationExpired
+        }
+        setProjectRequestedEnabled(false, projectID: item.projectID)
         try await withAuthenticatedPatchOperation(auth: auth) { operationID, revision in
             try await self.restoreProjectInOperation(item.projectID, auth: auth, revision: revision,
                                                      operationID: operationID, confirmation: confirmation)
@@ -911,6 +968,88 @@ final class FeaturePatchService: ObservableObject {
         patchOperationInProgress = true
     }
 
+    func recordPatchOffFailure(_ patch: PatchItem, requestedRevision: UInt64, auth: AuthManager) {
+        guard !Task.isCancelled, auth.authenticationRevision == requestedRevision else { return }
+        setRequestedEnabled(false, identity: patchStorageSlug(patch))
+    }
+
+    func recordRecoveryOffFailure(_ item: PatchRecoveryItem, requestedRevision: UInt64, auth: AuthManager) {
+        guard !Task.isCancelled, auth.authenticationRevision == requestedRevision else { return }
+        setProjectRequestedEnabled(false, projectID: item.projectID)
+    }
+
+    /// Requested UI state never owns actual ON/recovery state. Even when local
+    /// persistence is temporarily unavailable, keep the in-memory OFF request
+    /// visible while preserving every journal, association and backup.
+    private func setRequestedEnabled(_ enabled: Bool, identity: String) {
+        requestedStateOverrides[identity] = enabled
+        defaults.set(enabled, forKey: "patch_requested_enabled_" + identity)
+        if let projectID = catalogApplications.projectID(for: identity) {
+            requestedProjectOverrides[projectID] = enabled
+            defaults.set(enabled, forKey: "patch_requested_project_" + projectID.uuidString)
+        }
+        do {
+            var rows = try readRecoveryMetadata()
+            for index in rows.indices where rows[index].catalogIdentity == identity {
+                rows[index].requestedEnabled = enabled
+                requestedProjectOverrides[rows[index].projectID] = enabled
+                defaults.set(enabled, forKey: "patch_requested_project_" + rows[index].projectID.uuidString)
+            }
+            if !rows.isEmpty { try writeRecoveryMetadata(rows) }
+        } catch {
+            // Metadata is a presentation aid. Never replace a damaged file or
+            // clear recovery evidence just to make the switch appear OFF.
+        }
+        applicationRevision &+= 1
+        refreshRecoveryItems()
+    }
+
+    private func setProjectRequestedEnabled(_ enabled: Bool, projectID: UUID) {
+        requestedProjectOverrides[projectID] = enabled
+        defaults.set(enabled, forKey: "patch_requested_project_" + projectID.uuidString)
+        var identities = Set<String>()
+        for (key, value) in defaults.dictionaryRepresentation()
+            where key.hasPrefix("patch_applied_") && key.hasSuffix("_projectID") &&
+                  (value as? String).flatMap(UUID.init(uuidString:)) == projectID {
+            identities.insert(String(key.dropFirst("patch_applied_".count).dropLast("_projectID".count)))
+        }
+        if let rows = try? readRecoveryMetadata() {
+            for row in rows where row.projectID == projectID { identities.insert(row.catalogIdentity) }
+        }
+        for identity in identities { setRequestedEnabled(enabled, identity: identity) }
+        applicationRevision &+= 1
+        refreshRecoveryItems()
+    }
+
+    func isPatchEnabled(_ patch: PatchItem) -> Bool {
+        let identity = patchStorageSlug(patch)
+        guard patchApplicationState(patch) == .applied else { return false }
+        if let requested = requestedStateOverrides[identity] { return requested }
+        if let requested = defaults.object(forKey: "patch_requested_enabled_" + identity) as? Bool { return requested }
+        do {
+            let activeIDs = try activeCatalogProjectIDs(for: identity)
+            guard activeIDs.count == 1, let projectID = activeIDs.first else { return false }
+            if let requested = requestedProjectOverrides[projectID] { return requested }
+            if let requested = defaults.object(forKey: "patch_requested_project_" + projectID.uuidString) as? Bool { return requested }
+            let values = try readRecoveryMetadata().filter {
+                $0.catalogIdentity == identity && $0.projectID == projectID
+            }.compactMap(\.requestedEnabled)
+            return values.contains(false) ? false : true // Existing applied history migrates to ON.
+        } catch { return false }
+    }
+
+    private func requestedEnabled(projectID: UUID, metadata: CatalogRecoveryMetadata?, state: PatchApplicationState) -> Bool {
+        guard state == .applied else { return false }
+        if let requested = requestedProjectOverrides[projectID] { return requested }
+        if let requested = defaults.object(forKey: "patch_requested_project_" + projectID.uuidString) as? Bool { return requested }
+        if let metadata {
+            if let requested = requestedStateOverrides[metadata.catalogIdentity] { return requested }
+            if let requested = defaults.object(forKey: "patch_requested_enabled_" + metadata.catalogIdentity) as? Bool { return requested }
+            return metadata.requestedEnabled ?? true
+        }
+        return false // Unidentified historical recovery is not a user ON request.
+    }
+
     private func endPatchOperation() {
         pendingPatchOperations = max(0, pendingPatchOperations - 1)
         patchOperationInProgress = pendingPatchOperations > 0
@@ -943,7 +1082,12 @@ final class FeaturePatchService: ObservableObject {
         let safeTitle = String(String.UnicodeScalarView(title.unicodeScalars.filter {
             !CharacterSet.controlCharacters.contains($0)
         }.prefix(160)))
-        rows.append(CatalogRecoveryMetadata(projectID: projectID, title: safeTitle, catalogIdentity: identity))
+        rows.append(CatalogRecoveryMetadata(projectID: projectID, title: safeTitle, catalogIdentity: identity,
+            requestedEnabled: requestedStateOverrides[identity] ?? defaults.object(forKey: "patch_requested_enabled_" + identity) as? Bool))
+        try writeRecoveryMetadata(rows)
+    }
+
+    private func writeRecoveryMetadata(_ rows: [CatalogRecoveryMetadata]) throws {
         let encoder = PropertyListEncoder(); encoder.outputFormat = .binary
         let url = try recoveryMetadataURL()
         try encoder.encode(rows).write(to: url, options: [.atomic, .completeFileProtection])
@@ -957,8 +1101,9 @@ final class FeaturePatchService: ObservableObject {
                 throw PatchEngineStateError.invalidRecord
             }
             var names: [UUID: String] = [:]
+            var metadataByID: [UUID: CatalogRecoveryMetadata] = [:]
             var metadataError: Error?
-            do { for row in try readRecoveryMetadata() { names[row.projectID] = row.title } }
+            do { for row in try readRecoveryMetadata() { names[row.projectID] = row.title; metadataByID[row.projectID] = row } }
             catch { metadataError = error } // The journals still provide IDs.
             var ids = Set(names.keys)
             for directory in [root, root.appendingPathComponent(".engine-applications", isDirectory: true)] {
@@ -980,7 +1125,8 @@ final class FeaturePatchService: ObservableObject {
             recoveryItems = ids.compactMap { id in
                 guard let state = StorageEngineCoordinator.shared.projectApplicationState(id), state.requiresRestore else { return nil }
                 let title = names[id].flatMap { $0.isEmpty ? nil : $0 } ?? "Bản khôi phục \(id.uuidString.prefix(8))"
-                return PatchRecoveryItem(projectID: id, title: title, state: state)
+                return PatchRecoveryItem(projectID: id, title: title, state: state,
+                    requestedEnabled: requestedEnabled(projectID: id, metadata: metadataByID[id], state: state))
             }.sorted { $0.projectID.uuidString < $1.projectID.uuidString }
             recoveryInventoryError = metadataError == nil ? nil : "Không đọc được tên bản khôi phục. Lịch sử và bản sao lưu vẫn được giữ nguyên."
         } catch {
@@ -1743,6 +1889,7 @@ enum PatchRestoreError: LocalizedError {
     case missingReceipt
     case recoveryRequired
     case confirmationExpired
+    case retryNeedsRecovery(String)
     var errorDescription: String? {
         switch self {
         case .airLiftRestoreUnsupported:
@@ -1753,6 +1900,8 @@ enum PatchRestoreError: LocalizedError {
             return "Có giao dịch cũ hoặc dữ liệu đã thay đổi. Hãy kiểm tra và khôi phục bản sao lưu của lần áp dụng trước khi bật lại."
         case .confirmationExpired:
             return "Dữ liệu hoặc phiên đăng nhập đã thay đổi từ lúc kiểm tra. Hãy kiểm tra lại bản khôi phục trước khi xác nhận."
+        case .retryNeedsRecovery(let detail):
+            return "Chưa thể bật lại vì dữ liệu cũ cần khôi phục. Hãy mở Khôi phục dữ liệu để kiểm tra và xác nhận trước khi thử lại. \(detail)"
         }
     }
 }

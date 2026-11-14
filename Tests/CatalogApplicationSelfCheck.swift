@@ -17,6 +17,12 @@ enum ContainerStore {
     static func resolveAppContainerPath(bundleID: String, allowMetadataScan: Bool = true, retainAccess: Bool = true) -> String? { nil }
     static func resolveAppContainerForPatch(bundleID: String) throws -> String { throw CatalogCheckError.failed("device resolution must not be used") }
     static func grantContainerAccess(_ path: String) -> Int64 { 0 }
+    static func readWorseQueryIdentity(_ path: String) -> (identifier: String?, readable: Bool, diagnostics: [String]) {
+        preconditionFailure("device identity lookup must not be used")
+    }
+}
+enum IOS27ContainerSession {
+    static func invalidate(bundleIDs: [String]) { preconditionFailure("device session must not be used") }
 }
 enum WorseQueryError: Error { case appGroupUnavailable }
 enum WorseQueryHelper {

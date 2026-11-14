@@ -41,9 +41,11 @@ import Foundation
         let service=FeaturePatchService(),auth=AuthManager(),oldID=UUID()
         try Fixture.establish(oldID);associate(service,item,oldID)
         let oldReceipt=Fixture.receipts[oldID]
-        try await mustFail("active receipt allowed catalog replacement") { try await service.applyPatch(item,auth:auth) }
+        Fixture.failApply=true
+        try await mustFail("failed replacement ignored") { try await service.applyPatch(item,auth:auth) }
         try check(service.catalogApplications.projectID(for:"catalog_1_fixture")==oldID,"active association replaced")
-        try check(Fixture.receipts[oldID]==oldReceipt && Fixture.downloads==0,"active backup altered or redundant download started")
+        try check(Fixture.receipts[oldID]==oldReceipt && Fixture.restores==1,"replacement failed without safely retiring or retaining the old backup")
+        try check(!service.isPatchEnabled(item),"failed ON request remained visually enabled")
         try await service.restorePatch(item,auth:auth)
         try check(Fixture.restores==1 && !Fixture.forcedRestore,"normal OFF must use safe restore")
 
@@ -68,19 +70,19 @@ import Foundation
         try check(first.recoveryItems[0].title=="FeatureOne","display metadata did not sanitize control characters")
         let metadataURL=Fixture.root.appendingPathComponent(".catalog-recovery.plist")
         let rows=try PropertyListSerialization.propertyList(from:Data(contentsOf:metadataURL),format:nil) as! [[String:Any]]
-        try check(Set(rows[0].keys)==Set(["projectID","title","catalogIdentity"]),"recovery metadata contains payload/auth/URL fields")
+        try check(Set(rows[0].keys)==Set(["projectID","title","catalogIdentity","requestedEnabled"]),"recovery metadata contains payload/auth/URL fields")
         for key in Fixture.defaults.dictionaryRepresentation().keys { Fixture.defaults.removeObject(forKey:key) }
         let restarted=FeaturePatchService();restarted.refreshRecoveryItems()
         try check(restarted.recoveryItems.count==1 && restarted.recoveryItems[0].title=="FeatureOne","restart or preference loss hid durable recovery")
         try check(restarted.patchApplicationState(item) == .applied,"preference loss made the main catalog card display OFF")
         let recoveredCatalogReview=try await restarted.inspectPatchRestore(item,auth:auth)
         try check(recoveredCatalogReview.projectID==projectID,"main catalog inspection did not recover the durable project identity")
-        Fixture.nextProject=PatchProject()
         let downloadsBeforeRetry=Fixture.downloads
-        try await mustFail("preference loss permitted a new project for an active catalog identity") {
-            try await restarted.applyPatch(item,auth:auth)
-        }
-        try check(Fixture.downloads==downloadsBeforeRetry,"lost-preference retry downloaded a replacement for an active identity")
+        let preservedReceipt=Fixture.receipts[projectID]!.id,appliesBeforeRetry=Fixture.applies
+        try await restarted.applyPatch(item,auth:auth)
+        try check(Fixture.downloads==downloadsBeforeRetry+1 && Fixture.applies==appliesBeforeRetry,
+                  "verified same-project retry recaptured a new baseline")
+        try check(Fixture.receipts[projectID]?.id==preservedReceipt,"same-project retry replaced the original receipt")
         // A server catalog is not involved: restore through durable project ID.
         let recovery=restarted.recoveryItems[0]
         let normalReview=try await restarted.inspectRecoveryRestore(recovery,auth:auth)
@@ -170,9 +172,69 @@ import Foundation
             do { try await task.value;successes += 1 }
             catch { refusals += 1 }
         }
-        try check(successes==1 && refusals==1 && Fixture.applies==1 && Fixture.downloads==1,
-                  "two queued ON requests applied more than once or replaced the active project")
+        try check(successes==2 && refusals==0 && Fixture.applies==1 && Fixture.downloads==2,
+                  "two queued ON requests did not reuse the original verified application")
         try check(!concurrent.patchOperationInProgress,"completed queue retained busy state")
+
+        // User intent is OFF even when restoration fails. Actual history and
+        // original backup remain authoritative and available for recovery.
+        try Fixture.reset()
+        let retry=FeaturePatchService()
+        try await retry.applyPatch(item,auth:auth)
+        let originalProject=Fixture.nextProject.id, originalReceipt=Fixture.receipts[Fixture.nextProject.id]!
+        let originalApplies=Fixture.applies
+        try check(retry.isPatchEnabled(item),"successful ON did not persist requested state")
+        Fixture.failRestore=true
+        try await mustFail("injected OFF failure ignored") { try await retry.restorePatch(item,auth:auth) }
+        try check(!retry.isPatchEnabled(item) && retry.patchApplicationState(item) == .applied,
+                  "failed OFF either stayed visually ON or lied about actual restoration")
+        try check(Fixture.receipts[originalProject]==originalReceipt && retry.recoveryItems.first?.requestedEnabled==false,
+                  "failed OFF lost original backup or recovery warning intent")
+        for key in Fixture.defaults.dictionaryRepresentation().keys { Fixture.defaults.removeObject(forKey:key) }
+        let afterOffRestart=FeaturePatchService()
+        try check(!afterOffRestart.isPatchEnabled(item),"failed OFF was not recovered from durable intent metadata after preference loss")
+        Fixture.failRestore=false
+        try await afterOffRestart.applyPatch(item,auth:auth)
+        try check(afterOffRestart.isPatchEnabled(item) && Fixture.applies==originalApplies,
+                  "ON after failed OFF did not adopt the verified existing application")
+        try check(Fixture.receipts[originalProject]==originalReceipt,"ON retry created a backup from patched bytes")
+
+        // Cancelling the changed-file review does not issue OFF. A real
+        // noncancel inspection error can record OFF without touching targets.
+        Fixture.changed=true
+        let cancelledReview=try await afterOffRestart.inspectPatchRestore(item,auth:auth)
+        try check(!cancelledReview.changedPaths.isEmpty && afterOffRestart.isPatchEnabled(item),
+                  "opening/cancelling a review changed requested ON state")
+        let inspectionRevision=auth.authenticationRevision
+        Fixture.failInspect=true
+        try await mustFail("inspection failure ignored") { _ = try await afterOffRestart.inspectPatchRestore(item,auth:auth) }
+        afterOffRestart.recordPatchOffFailure(item,requestedRevision:inspectionRevision,auth:auth)
+        try check(!afterOffRestart.isPatchEnabled(item) && Fixture.states[originalProject] == .applied,
+                  "inspection failure did not separate OFF intent from real file state")
+        Fixture.failInspect=false
+        try await mustFail("ON retry force-restored changed game files") { try await afterOffRestart.applyPatch(item,auth:auth) }
+        try check(Fixture.restores==0 && Fixture.receipts[originalProject]==originalReceipt && !afterOffRestart.isPatchEnabled(item),
+                  "blocked ON retry destroyed recovery evidence or silently forced restoration")
+        Fixture.changed=false
+        try await afterOffRestart.applyPatch(item,auth:auth)
+        auth.authenticationRevision += 1
+        afterOffRestart.recordPatchOffFailure(item,requestedRevision:inspectionRevision,auth:auth)
+        try check(afterOffRestart.isPatchEnabled(item),"an old session error changed the newer session's requested state")
+
+        // If a newer project is published, retire the old baseline safely first.
+        Fixture.nextProject=PatchProject()
+        let updatedProject=Fixture.nextProject.id
+        try await afterOffRestart.applyPatch(item,auth:auth)
+        try check(Fixture.states[originalProject] == .off && Fixture.states[updatedProject] == .applied,
+                  "updated project did not safely restore previous history before applying")
+        try check(Fixture.receipts[originalProject]==originalReceipt && Fixture.applies==originalApplies+1,
+                  "updated project overwrote the original backup or recaptured twice")
+
+        let recoveryRetry=afterOffRestart.recoveryItems.first { $0.projectID==updatedProject }!
+        Fixture.failRestore=true
+        try await mustFail("recovery OFF failure ignored") { try await afterOffRestart.restoreRecovery(recoveryRetry,auth:auth) }
+        try check(!afterOffRestart.isPatchEnabled(item) && afterOffRestart.recoveryItems.first?.requestedEnabled==false,
+                  "recovery failure did not publish OFF intent with retained recovery history")
 
         try Fixture.reset()
         let inventory=FeaturePatchService();try Fixture.establish(Fixture.nextProject.id);inventory.refreshRecoveryItems()

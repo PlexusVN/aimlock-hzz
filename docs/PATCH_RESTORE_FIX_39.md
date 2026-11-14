@@ -12,7 +12,7 @@ Các lần lưu journal/provenance/marker và commit entry có đồng bộ file
 
 ## Catalog và liên kết backup
 
-Service kiểm tra identity đang active trước khi tải/nhận project mới. Mất preference vẫn được đối chiếu với metadata identity đã lưu. Một apply thất bại trước khi tạo lịch sử active không chiếm association; nếu đã có journal/provenance cần xử lý thì association mới được giữ để recovery tìm tới đúng nó.
+Service xác định lịch sử active trước khi nhận project mới. Sau một OFF lỗi, ON có thể xác minh lại đúng project/payload đang có và dùng tiếp receipt cũ; nếu là revision/project khác thì phải khôi phục lịch sử cũ an toàn trong cùng gate trước khi apply mới. Không lấy dữ liệu đang patch làm baseline mới. Mất preference vẫn đối chiếu với metadata identity đã lưu; lỗi trước khi có journal mới không chiếm association cũ.
 
 Metadata recovery chỉ chứa project ID, tên hiển thị và catalog identity; không chứa payload, mật khẩu, key hoặc URL. Đọc danh sách từ journal/provenance và metadata local, độc lập catalog tải về. Lỗi catalog/gỡ item/mất preference không làm mất đường nhìn thấy transaction. Tên metadata hỏng có thể hiện bằng project ID; storage tạm khóa giữ danh sách đang thấy và báo lỗi.
 
@@ -34,7 +34,7 @@ Trong giao dịch dở dang, các target còn đúng trạng thái trước appl
 
 ## Giao diện
 
-Tab Chức năng có mục Khôi phục dữ liệu độc lập với danh mục và lỗi tải. Mọi card dùng trạng thái bận chung; thay category/card không tạo nút enabled trong khi yêu cầu cũ còn chạy. Sheet xác nhận liệt kê file đổi, có lựa chọn hủy rõ ràng; hủy không ghi và không báo OFF.
+Tab Chức năng có mục Khôi phục dữ liệu độc lập với danh mục và lỗi tải. Mọi card dùng trạng thái bận chung; thay category/card không tạo nút enabled trong khi yêu cầu cũ còn chạy. Sheet xác nhận liệt kê file đổi, có lựa chọn hủy rõ ràng; hủy không ghi và giữ ý định ON trước đó. Theo yêu cầu mới, OFF lỗi (kể cả inspection lỗi, trừ cancellation/phiên đã đổi) báo lỗi và đưa toggle về OFF. Ý định OFF được lưu riêng; journal và backup vẫn active/recovery, hiển thị “Chưa khôi phục”. Lần ON sau có thể retry theo receipt cũ, không bỏ qua các kiểm tra lịch sử hoặc force restore âm thầm.
 
 Danh sách local có thể hiển thị khi catalog không có; thao tác restore vẫn tuân theo auth/network/integrity hiện có. Build này không mở đường bypass license hoặc restore tùy ý qua AirLift. Không thể dựng lại backup/journal đã mất hoàn toàn.
 
@@ -45,3 +45,7 @@ Các test mới chạy thân hàm production và filesystem tạm để tái hi�
 Kết quả cuối, commit GitHub, workflow và IPA được tổng hợp tại `KE_HOACH_VA_KET_QUA_SUA_PATCH_RESTORE_2026-11-15.md` ở workspace và artifact `scratch/patch-restore-fix-20261115/`.
 
 Để xác nhận quyền sandbox/daemon, metadata Darwin trên thiết bị, engine và độ ổn định từng OS/SoC vẫn cần thử IPA đã ký trên iPhone thật. File game do tiến trình khác sửa sau khi giao dịch đã hoàn tất không thể bị khóa vĩnh viễn bởi gate nội bộ app.
+
+## Chuẩn bị tổng quát worse_query
+
+Bước vào app quét tổng quát cửa sổ inode ước lượng của vùng Application container, không lọc game, không cần game được cài hoặc đọc được bundle identifier. Chỉ cần App Group hợp lệ và ít nhất một container nhận quyền/đọc được. Session không tự gán UUID chưa xác minh thành game. Khi thao tác cần ghi, app mới tìm và kiểm đúng target, rồi xác minh identity lại dưới grant transaction. Không mở rộng native scope, không tuyên bố quét mọi file hệ thống của iPhone.

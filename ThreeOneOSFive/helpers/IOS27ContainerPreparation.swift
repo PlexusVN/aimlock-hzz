@@ -29,22 +29,27 @@ final class IOS27ContainerPreparation: ObservableObject {
     private var generation: UInt64 = 0
     private let progress: ContainerScanProgress
     private let operation: @Sendable ([String], Bool) throws -> [String: String]
+    private let generalOperation: @Sendable (Bool) throws -> Void
     private var targetBundleIDs: [String] = []
     private var forceNextScan = false
 
     init(progress: ContainerScanProgress = .shared,
          operation: @escaping @Sendable ([String], Bool) throws -> [String: String] = {
              try ContainerStore.prepareIOS27Access(bundleIDs: $0, forceScan: $1)
+         },
+         generalOperation: @escaping @Sendable (Bool) throws -> Void = {
+             try ContainerStore.prepareWorseQueryFilesystemAccess(forceScan: $0)
          }) {
         self.progress = progress
         self.operation = operation
+        self.generalOperation = generalOperation
     }
 
-    /// The application supplies its known capabilities before displaying the
-    /// mandatory preparation gate. The discovery engine contains no game list.
+    /// Keep known patch capabilities for lazy target discovery. They do not
+    /// determine whether general filesystem preparation can enter the app.
     func configureTargets(bundleIDs: [String]) {
         do {
-            let requested = try validatedTargets(bundleIDs)
+            let requested = Array(Set(try bundleIDs.map { try PatchPathValidator.canonicalBundleIdentifier($0) })).sorted()
             guard requested != targetBundleIDs else { return }
             reset()
             targetBundleIDs = requested
@@ -63,10 +68,6 @@ final class IOS27ContainerPreparation: ObservableObject {
 
     func prepareIfNeeded(force: Bool = false) async {
         guard work == nil, state != .ready || force else { return }
-        guard !targetBundleIDs.isEmpty else {
-            state = .failed; failure = "Chưa có ứng dụng hợp lệ để chuẩn bị quyền truy cập."
-            return
-        }
         if !force && !forceNextScan && progress.snapshot.phase == .interrupted {
             state = .failed
             failure = "Phiên chuẩn bị trước bị gián đoạn. Xem dòng log cuối rồi chọn Thử lại để tiếp tục."
@@ -76,19 +77,21 @@ final class IOS27ContainerPreparation: ObservableObject {
         let revision = generation
         state = .preparing; failure = nil; didContinue = false
         IOS27ContainerSession.reset()
-        let operation = self.operation
-        let targets = targetBundleIDs
+        let generalOperation = self.generalOperation
         let forceScan = force || forceNextScan
         forceNextScan = false
-        let task = Task.detached(priority: .userInitiated) { try operation(targets, forceScan) }
+        let task = Task.detached(priority: .userInitiated) { () throws -> [String: String] in
+            try generalOperation(forceScan)
+            return [:]
+        }
         work = task
         do {
-            let roots = try await withTaskCancellationHandler(operation: { try await task.value }, onCancel: { task.cancel() })
+            _ = try await withTaskCancellationHandler(operation: { try await task.value }, onCancel: { task.cancel() })
             try Task.checkCancellation()
             guard revision == generation else { return }
-            let verified = try validatedRoots(roots, requested: targets)
-            guard !verified.isEmpty else { throw WorseQueryError.preparationRequired }
-            IOS27ContainerSession.install(verified)
+            // General access is not a verified bundle-ID mapping. Publish no
+            // target roots until an actual patch asks for and verifies them.
+            IOS27ContainerSession.reset()
             state = .ready
         } catch {
             guard revision == generation else { return }
@@ -115,8 +118,8 @@ final class IOS27ContainerPreparation: ObservableObject {
         let operation = self.operation
         let task = Task.detached(priority: .userInitiated) {
             var resolved: [String: String] = [:]
-            // Initial preparation permits any installed optional target. A
-            // patch requires EACH requested app, so a cache hit for A must not
+            // General preparation does not look for a game. A patch requires
+            // EACH requested app, so a cache hit for A must not
             // short-circuit discovery of B in the same patch.
             for target in requested {
                 try Task.checkCancellation()

@@ -63,6 +63,7 @@ func patchStorageSlug(_ patch:PatchItem)->String { patch.identity }
 private func beginPatchOperation() {}
 private func endPatchOperation() {}
 private func refreshRecoveryItems() {}
+private func setRequestedEnabled(_ value:Bool,identity:String) {}
 // Display metadata is an I/O boundary in this provenance fixture. The real
 // inventory/resolver and preference-loss cases run in test_catalog_recovery.
 private func readRecoveryMetadata() throws -> [CatalogRecoveryMetadata] { [] }

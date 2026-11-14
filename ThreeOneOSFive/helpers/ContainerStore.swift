@@ -211,6 +211,82 @@ enum ContainerStore {
     }
 
     private static var worseQueryResume: [String: (next: UInt64, maximum: UInt64)] = [:]
+    // Memory-only directory hints, never bundle-ID mappings or retained grants.
+    // Both readers and writers already own discoveryLock.
+    private static var worseQueryGeneralCandidates: [String] = []
+
+    /// Establish general read access without requiring a particular installed
+    /// app or readable bundle identifier. Scan the complete existing estimated
+    /// application-container inode window; this is not a claim to enumerate
+    /// every file or grant access outside worse_query's supported scope.
+    static func prepareWorseQueryFilesystemAccess(forceScan: Bool = false) throws {
+        guard discoveryLock.try() else { throw WorseQueryError.discoveryInProgress }
+        defer { discoveryLock.unlock() }
+        worseQueryGeneralCandidates = []
+        let candidates = try ContainerScanProgress.shared.track(bundleID: "Quét thư mục có thể truy cập",
+            successMessage: "Đã quét phạm vi thư mục có thể truy cập. Có thể vào ứng dụng; thư mục đích được xác minh khi dùng chức năng.") { sessionID in
+            guard WorseQueryHelper.isOSSupported else { throw WorseQueryError.unsupportedOS(AppInfo.osBuild) }
+            ContainerScanProgress.shared.checkpoint(sessionID, message: "Kiểm tra App Group của bản ký hiện tại…")
+            WorseQueryHelper.invalidateActiveAppGroup()
+            ContainerScanProgress.shared.checkpoint(sessionID, message: WorseQueryHelper.preparationContext)
+            guard WorseQueryHelper.isAppGroupConfigured else { throw WorseQueryError.appGroupUnavailable }
+            ContainerScanProgress.shared.checkpoint(sessionID, message: try WorseQueryHelper.preparationDiagnostics())
+            let maximum = try WorseQueryHelper.currentFilesystemMaxInode()
+            guard maximum > 0 else { throw WorseQueryError.preparationRequired }
+            let chunkSize: UInt64 = 50_000
+            var first: UInt64 = 1
+            var seen = Set<String>()
+            var candidates = 0, grants = 0, readable = 0
+            var lastGrantError: Error?
+            ContainerScanProgress.shared.report(sessionID, scanned: 0, total: maximum,
+                candidates: 0, grants: 0, readable: 0, identified: 0, matched: 0,
+                message: "Quét toàn bộ cửa sổ inode ước lượng 1…\(maximum) của vùng container. Không cần cài game hoặc đọc được định danh game để vào ứng dụng.")
+            while first <= maximum {
+                try ContainerScanProgress.shared.checkCancellation(sessionID)
+                let last = first + min(chunkSize - 1, maximum - first)
+                let paths = try WorseQueryHelper.enumeratePaths(in: appDataRoot, from: first, through: last)
+                for path in paths {
+                    try ContainerScanProgress.shared.checkCancellation(sessionID)
+                    let clean = ContainerDiscoveryMerger.canonicalPath(path)
+                    guard isApplicationContainerPath(clean), seen.insert(clean).inserted else { continue }
+                    candidates += 1
+                    ContainerScanProgress.shared.checkpoint(sessionID,
+                        message: "Kiểm tra quyền đọc thư mục \(clean)", candidates: candidates, grants: grants)
+                    let handle: Int64
+                    do { handle = try WorseQueryHelper.acquireAccess(for: clean) }
+                    catch {
+                        lastGrantError = error
+                        if (error as? WorseQueryError)?.blocksContainerPreparation == true { throw error }
+                        ContainerScanProgress.shared.checkpoint(sessionID,
+                            message: "Thư mục chưa cấp quyền: \(error.localizedDescription)")
+                        continue
+                    }
+                    defer { WorseQueryHelper.releaseAccess(handle: handle) }
+                    grants += 1
+                    do {
+                        _ = try FileManager.default.contentsOfDirectory(atPath: clean)
+                        readable += 1
+                    } catch {
+                        ContainerScanProgress.shared.checkpoint(sessionID,
+                            message: "Chưa đọc được thư mục: \(error.localizedDescription)")
+                    }
+                }
+                ContainerScanProgress.shared.report(sessionID, scanned: last, total: maximum,
+                    candidates: candidates, grants: grants, readable: readable, identified: 0, matched: 0,
+                    message: "Đã quét \(last)/\(maximum) inode trong cửa sổ ước lượng; \(candidates) thư mục, \(grants) handle, \(readable) đọc được. Không lọc theo game.")
+                if last == maximum { break }
+                first = last + 1
+            }
+            guard readable > 0 else {
+                if grants == 0, let lastGrantError { throw lastGrantError }
+                throw WorseQueryError.preparationRequired
+            }
+            try ContainerScanProgress.shared.checkCancellation(sessionID)
+            return Array(seen.sorted().prefix(10_000))
+        }
+        try Task.checkCancellation()
+        worseQueryGeneralCandidates = candidates
+    }
 
     static func prepareIOS27Access(bundleIDs: [String], forceScan: Bool = false) throws -> [String: String] {
         let targets = Set(try bundleIDs.map { try PatchPathValidator.canonicalBundleIdentifier($0) })
@@ -280,6 +356,21 @@ enum ContainerStore {
                         ContainerScanProgress.shared.checkpoint(sessionID, message: "Cache không dùng được: \(error.localizedDescription)")
                     }
                     if found[bundleID] == nil { UserDefaults.standard.removeObject(forKey: "astra.resolved_container.\(bundleID)") }
+                }
+            }
+            // The general scan already enumerated these UUID candidates. Do
+            // not walk the inode window again for the first real operation.
+            // Reacquire each grant and read identity now; a hint is not access
+            // or proof of its target. Inspect all hints to detect conflicts.
+            if !forceScan {
+                for candidate in worseQueryGeneralCandidates {
+                    do { try inspect(candidate) }
+                    catch is CancellationError { throw CancellationError() }
+                    catch {
+                        if (error as? WorseQueryError)?.blocksContainerPreparation == true { throw error }
+                        ContainerScanProgress.shared.checkpoint(sessionID,
+                            message: "Gợi ý thư mục cũ chưa dùng được: \(error.localizedDescription)")
+                    }
                 }
             }
             ContainerScanProgress.shared.report(sessionID, scanned: 0, total: 0, candidates: candidates, grants: grants,
