@@ -61,7 +61,6 @@ struct VideoCheckRoot: View {
             }
         }
         .environment(\.scenePhase, .active)
-        .environment(\.accessibilityReduceMotion, false)
         .environment(\.hasAppVideoBackground, true)
         .preferredColorScheme(.dark)
         .ignoresSafeArea()
