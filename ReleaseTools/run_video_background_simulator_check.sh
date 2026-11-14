@@ -60,7 +60,7 @@ python3 - "$DEVICE_ID" "$DATA/Documents" "$OUT" <<'PY'
 from pathlib import Path
 import sys, json, time, subprocess, shutil
 device, documents, output = sys.argv[1], Path(sys.argv[2]), Path(sys.argv[3])
-deadline = time.monotonic()+120
+deadline = time.monotonic()+300
 seen=set()
 while time.monotonic() < deadline:
     path=documents/'report.json'

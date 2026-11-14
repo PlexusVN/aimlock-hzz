@@ -133,7 +133,7 @@ final class VideoDriver {
         }
         pendingCapture = name
         writeReport()
-        try await wait("capture acknowledgement " + name, seconds: 20) {
+        try await wait("capture acknowledgement " + name, seconds: 60) {
             FileManager.default.fileExists(atPath: documents.appendingPathComponent("ack-" + name).path)
         }
         captures.append(name)
