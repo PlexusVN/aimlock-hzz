@@ -21,6 +21,13 @@ struct FeaturesView: View {
     @State private var showCategoryPicker = false
     @State private var activeToast: ToastInfo?
     @State private var contentVisible = false
+    @State private var workingActionID: String?
+    @State private var actionTask: Task<Void, Never>?
+    @State private var pendingRestore: FeatureRestoreReview?
+
+    private var actionsBlocked: Bool {
+        workingActionID != nil || service.patchOperationInProgress || pendingRestore != nil
+    }
 
     var body: some View {
         NavigationStack {
@@ -30,6 +37,7 @@ struct FeaturesView: View {
                 ScrollView {
                     VStack(spacing: 16) {
                         categoryPanel
+                        recoveryPanel
                         patchPanel
                     }
                     .padding(.horizontal, 16)
@@ -63,6 +71,7 @@ struct FeaturesView: View {
             }
             .refreshable { await service.syncFromServer(auth: authManager) }
             .onAppear {
+                service.refreshRecoveryItems()
                 if selectedCategoryID == nil, let first = service.categories.first {
                     selectedCategoryID = first.id
                 }
@@ -79,6 +88,22 @@ struct FeaturesView: View {
             })
         }
         .glassToast(toast: $activeToast)
+        .sheet(item: $pendingRestore) { review in
+            RestoreReviewSheet(review: review,
+                               canConfirm: !service.patchOperationInProgress,
+                               onCancel: { pendingRestore = nil },
+                               onConfirm: { confirmRestore(review) })
+        }
+        .onChange(of: authManager.authenticationRevision) { _ in
+            // A confirmation and queued UI intent belong to the requesting
+            // session. The service independently validates its revision/token.
+            pendingRestore = nil
+            actionTask?.cancel()
+        }
+        .onDisappear {
+            actionTask?.cancel()
+            pendingRestore = nil
+        }
         .overlay {
             if showCategoryPicker {
                 ZStack {
@@ -324,7 +349,10 @@ struct FeaturesView: View {
             } else {
                 LazyVStack(spacing: 10) {
                     ForEach(filteredPatches, id: \.downloadIdentity) { patch in
-                        PatchCardView(patch: patch, service: service, auth: authManager, activeToast: $activeToast)
+                        PatchCardView(patch: patch, service: service,
+                                      isWorking: workingActionID == "patch:\(patch.downloadIdentity)",
+                                      actionsBlocked: actionsBlocked,
+                                      onToggle: { togglePatch(patch) })
                     }
                 }
             }
@@ -363,6 +391,278 @@ struct FeaturesView: View {
         }
         return service.patches
     }
+
+    // Recovery stays outside catalog/category filters. Server removal or a
+    // failed refresh must not remove the route to a local active transaction.
+    @ViewBuilder
+    private var recoveryPanel: some View {
+        if !service.recoveryItems.isEmpty || service.recoveryInventoryError != nil {
+            VStack(alignment: .leading, spacing: 12) {
+                HStack(spacing: 8) {
+                    Image(systemName: "arrow.counterclockwise")
+                    Text("Khôi phục dữ liệu")
+                        .font(.system(size: 15, weight: .bold))
+                    Spacer()
+                    Text("\(service.recoveryItems.count)")
+                        .font(.system(size: 11, weight: .semibold, design: .monospaced))
+                }
+                .foregroundStyle(AppTheme.gamingText)
+
+                Text("Các lần áp dụng còn được lưu trên thiết bị, kể cả khi chức năng không còn trong danh mục.")
+                    .font(.system(size: 11))
+                    .foregroundStyle(AppTheme.gamingTextSecondary)
+                    .fixedSize(horizontal: false, vertical: true)
+
+                ForEach(service.recoveryItems) { item in
+                    recoveryRow(item)
+                }
+
+                if let error = service.recoveryInventoryError {
+                    Text(error)
+                        .font(.system(size: 11))
+                        .foregroundStyle(AppTheme.statusWarning)
+                        .fixedSize(horizontal: false, vertical: true)
+                    Button("Đọc lại dữ liệu khôi phục") { service.refreshRecoveryItems() }
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundStyle(AppTheme.gamingText)
+                        .disabled(actionsBlocked)
+                }
+            }
+            .padding(14)
+            .background(AppTheme.gamingSurface, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+            .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .stroke(AppTheme.gamingBorder, lineWidth: 1))
+        }
+    }
+
+    private func recoveryRow(_ item: PatchRecoveryItem) -> some View {
+        HStack(spacing: 10) {
+            Image(systemName: item.state == .recoveryRequired ? "exclamationmark.triangle" : "arrow.counterclockwise")
+                .font(.system(size: 16, weight: .semibold))
+                .foregroundStyle(item.state == .recoveryRequired ? AppTheme.statusWarning : AppTheme.gamingText)
+                .frame(width: 26)
+            VStack(alignment: .leading, spacing: 4) {
+                Text(userFacingFeatureText(item.title, fallback: "Dữ liệu đã áp dụng"))
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundStyle(AppTheme.gamingText)
+                    .fixedSize(horizontal: false, vertical: true)
+                Text(item.state == .recoveryRequired ? "Cần kiểm tra trước khi khôi phục" : "Đang áp dụng")
+                    .font(.system(size: 10))
+                    .foregroundStyle(item.state == .recoveryRequired ? AppTheme.statusWarning : AppTheme.gamingTextSecondary)
+                Text("Mã \(item.projectID.uuidString.prefix(8))")
+                    .font(.system(size: 9, design: .monospaced))
+                    .foregroundStyle(AppTheme.gamingTextSecondary)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            if workingActionID == "recovery:\(item.projectID.uuidString)" {
+                ProgressView().tint(AppTheme.gamingText)
+                    .frame(width: 80, height: 44)
+            } else {
+                Button("Khôi phục") { beginRestore(.recovery(item)) }
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(AppTheme.gamingText)
+                    .frame(minWidth: 64, minHeight: 44)
+                    .padding(.horizontal, 8)
+                    .background(AppTheme.gamingSurfaceRaised, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+                    .buttonStyle(GamingPressButtonStyle(scale: 0.985))
+                    .disabled(actionsBlocked)
+                    .opacity(actionsBlocked ? 0.5 : 1)
+                    .accessibilityLabel("Khôi phục \(item.title)")
+                    .accessibilityIdentifier("recovery-restore-\(item.projectID.uuidString)")
+            }
+        }
+        .padding(10)
+        .background(AppTheme.gamingBackgroundRaised, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+    }
+
+    // All cards share one UI operation state. Changing category can replace a
+    // card, but it cannot recreate an enabled button while its write is active.
+    private func togglePatch(_ patch: PatchItem) {
+        guard !actionsBlocked else { return }
+        if service.patchApplicationState(patch).requiresRestore {
+            beginRestore(.patch(patch))
+            return
+        }
+        Haptics.medium()
+        workingActionID = "patch:\(patch.downloadIdentity)"
+        actionTask = Task { @MainActor in
+            defer { workingActionID = nil; actionTask = nil }
+            do {
+                try await service.applyPatch(patch, auth: authManager)
+                showSuccess(title: "Bật chức năng thành công", message: "Chức năng đang bật.")
+            } catch {
+                showFailure(error, title: "Không thể bật chức năng")
+            }
+        }
+    }
+
+    private func beginRestore(_ target: FeatureRestoreTarget) {
+        guard !actionsBlocked else { return }
+        Haptics.medium()
+        workingActionID = target.actionID
+        actionTask = Task { @MainActor in
+            defer { workingActionID = nil; actionTask = nil }
+            do {
+                let confirmation: PatchRestoreConfirmation
+                switch target {
+                case .patch(let patch):
+                    confirmation = try await service.inspectPatchRestore(patch, auth: authManager)
+                case .recovery(let item):
+                    confirmation = try await service.inspectRecoveryRestore(item, auth: authManager)
+                }
+                try Task.checkCancellation()
+                if confirmation.changedPaths.isEmpty {
+                    try await restore(target, confirmation: confirmation)
+                    showRestoreSuccess()
+                } else {
+                    pendingRestore = FeatureRestoreReview(target: target, confirmation: confirmation)
+                }
+            } catch {
+                showFailure(error, title: "Không thể khôi phục")
+            }
+        }
+    }
+
+    private func confirmRestore(_ review: FeatureRestoreReview) {
+        guard workingActionID == nil, !service.patchOperationInProgress,
+              pendingRestore?.id == review.id else { return }
+        pendingRestore = nil
+        workingActionID = review.target.actionID
+        actionTask = Task { @MainActor in
+            defer { workingActionID = nil; actionTask = nil }
+            do {
+                // The service binds this review to receipt, authentication and
+                // inspected bytes; a later change requires another inspection.
+                try await restore(review.target, confirmation: review.confirmation)
+                showRestoreSuccess()
+            } catch {
+                showFailure(error, title: "Chưa thể khôi phục")
+            }
+        }
+    }
+
+    @MainActor
+    private func restore(_ target: FeatureRestoreTarget, confirmation: PatchRestoreConfirmation) async throws {
+        switch target {
+        case .patch(let patch):
+            try await service.restorePatch(patch, auth: authManager, confirmation: confirmation)
+        case .recovery(let item):
+            try await service.restoreRecovery(item, auth: authManager, confirmation: confirmation)
+        }
+    }
+
+    private func showRestoreSuccess() {
+        showSuccess(title: "Khôi phục thành công", message: "Đã trả lại dữ liệu đã sao lưu trước lần áp dụng này.")
+    }
+
+    private func showSuccess(title: String, message: String) {
+        Haptics.success()
+        activeToast = ToastInfo(title: title, message: message, isSuccess: true)
+    }
+
+    private func showFailure(_ error: Error, title: String) {
+        guard !(error is CancellationError) else { return }
+        Haptics.error()
+        activeToast = ToastInfo(title: title,
+                              message: (error as? LocalizedError)?.errorDescription
+                                ?? "Thao tác chưa hoàn tất. Bản sao lưu được giữ nguyên.",
+                              isSuccess: false)
+    }
+}
+
+private enum FeatureRestoreTarget {
+    case patch(PatchItem)
+    case recovery(PatchRecoveryItem)
+
+    var actionID: String {
+        switch self {
+        case .patch(let patch): return "patch:\(patch.downloadIdentity)"
+        case .recovery(let item): return "recovery:\(item.projectID.uuidString)"
+        }
+    }
+
+    var title: String {
+        switch self {
+        case .patch(let patch): return patch.name
+        case .recovery(let item): return item.title
+        }
+    }
+}
+
+private struct FeatureRestoreReview: Identifiable {
+    let target: FeatureRestoreTarget
+    let confirmation: PatchRestoreConfirmation
+    var id: UUID { confirmation.id }
+}
+
+private struct RestoreReviewSheet: View {
+    let review: FeatureRestoreReview
+    let canConfirm: Bool
+    let onCancel: () -> Void
+    let onConfirm: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            HStack(spacing: 10) {
+                Image(systemName: "exclamationmark.triangle.fill")
+                    .foregroundStyle(AppTheme.statusWarning)
+                Text("Dữ liệu đã thay đổi")
+                    .font(.system(size: 20, weight: .bold))
+                    .foregroundStyle(AppTheme.gamingText)
+            }
+            Text(userFacingFeatureText(review.target.title, fallback: "Chức năng đã áp dụng"))
+                .font(.system(size: 14, weight: .semibold))
+                .foregroundStyle(AppTheme.gamingText)
+            Text("Game hoặc ứng dụng đã sửa các mục dưới đây sau lần bật. Khôi phục sẽ thay thế dữ liệu hiện tại bằng bản sao lưu trước lần áp dụng; các thay đổi mới hơn ở những mục này sẽ mất.")
+                .font(.system(size: 13))
+                .foregroundStyle(AppTheme.gamingTextSecondary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            ScrollView {
+                VStack(alignment: .leading, spacing: 10) {
+                    ForEach(Array(review.confirmation.changedPaths.enumerated()), id: \.offset) { index, path in
+                        HStack(alignment: .top, spacing: 8) {
+                            Text("\(index + 1).")
+                                .foregroundStyle(AppTheme.gamingTextSecondary)
+                            Text(path)
+                                .foregroundStyle(AppTheme.gamingText)
+                                .textSelection(.enabled)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                        .font(.system(size: 11, design: .monospaced))
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                }
+                .padding(12)
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .background(AppTheme.gamingBackgroundRaised, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+
+            Button(role: .destructive, action: onConfirm) {
+                Text("Khôi phục bản sao lưu")
+                    .font(.system(size: 14, weight: .bold))
+                    .frame(maxWidth: .infinity, minHeight: 48)
+                    .foregroundStyle(AppTheme.gamingBackground)
+                    .background(AppTheme.statusWarning, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+            }
+            .buttonStyle(GamingPressButtonStyle(scale: 0.985))
+            .disabled(!canConfirm)
+            .opacity(canConfirm ? 1 : 0.5)
+            .accessibilityHint("Thay thế các mục đã liệt kê bằng dữ liệu đã sao lưu")
+            .accessibilityIdentifier("restore-confirm")
+
+            Button("Hủy, giữ dữ liệu hiện tại", action: onCancel)
+                .font(.system(size: 14, weight: .semibold))
+                .foregroundStyle(AppTheme.gamingText)
+                .frame(maxWidth: .infinity, minHeight: 44)
+                .accessibilityIdentifier("restore-cancel")
+        }
+        .padding(20)
+        .background(AppTheme.gamingSurface.ignoresSafeArea())
+        .presentationDetents([.large])
+        .presentationDragIndicator(.visible)
+        .preferredColorScheme(.dark)
+    }
 }
 
 // MARK: - Function card
@@ -370,11 +670,11 @@ struct FeaturesView: View {
 struct PatchCardView: View {
     let patch: PatchItem
     @ObservedObject var service: FeaturePatchService
-    @ObservedObject var auth: AuthManager
+    let isWorking: Bool
+    let actionsBlocked: Bool
+    let onToggle: () -> Void
     private var applicationState: PatchApplicationState { service.patchApplicationState(patch) }
     private var isApplied: Bool { applicationState.requiresRestore }
-    @State private var isWorking = false
-    @Binding var activeToast: ToastInfo?
 
     private var stateColor: Color {
         applicationState == .recoveryRequired ? AppTheme.statusWarning : (isApplied ? AppTheme.statusSuccess : AppTheme.gamingTextSecondary)
@@ -462,7 +762,7 @@ struct PatchCardView: View {
             .frame(width: 56, height: 44)
             .accessibilityLabel("Đang xử lý")
         } else {
-            Button(action: { togglePatch() }) {
+            Button(action: onToggle) {
                 ZStack {
                     Capsule()
                         .fill(isApplied ? AppTheme.gamingText : AppTheme.gamingSurfaceRaised)
@@ -484,74 +784,12 @@ struct PatchCardView: View {
                 .animation(AppTheme.gamingTabSpring, value: isApplied)
             }
             .buttonStyle(GamingPressButtonStyle(scale: 0.97))
+            .disabled(actionsBlocked)
+            .opacity(actionsBlocked ? 0.5 : 1)
             .accessibilityLabel(userFacingFeatureText(patch.name, fallback: "Chức năng"))
             .accessibilityValue(applicationState == .recoveryRequired ? "Cần khôi phục" : (isApplied ? "Đang bật" : "Đang tắt"))
             .accessibilityHint(isApplied ? "Chạm để tắt và khôi phục" : "Chạm để bật")
-        }
-    }
-
-    // MARK: - Actions
-
-    private func togglePatch() {
-        Haptics.medium()
-        isWorking = true
-        activeToast = ToastInfo(
-            title: isApplied ? "Chức năng đang tắt" : "Chức năng đang bật",
-            message: "Vui lòng chờ...",
-            isSuccess: true
-        )
-
-        let targetIsApplied = isApplied
-        Task.detached(priority: .userInitiated) {
-            if targetIsApplied {
-                do {
-                    try await service.restorePatch(patch, auth: auth)
-                    await MainActor.run {
-                        isWorking = false
-                        Haptics.success()
-                        activeToast = ToastInfo(
-                            title: "Tắt chức năng thành công",
-                            message: "Đã khôi phục dữ liệu đã sao lưu trước lần áp dụng này.",
-                            isSuccess: true
-                        )
-                    }
-                } catch {
-                    await MainActor.run {
-                        isWorking = false
-                        Haptics.error()
-                        activeToast = ToastInfo(
-                            title: "Không thể tắt chức năng",
-                            message: (error as? LocalizedError)?.errorDescription
-                                ?? "Không thể khôi phục dữ liệu (mã \((error as NSError).code)).",
-                            isSuccess: false
-                        )
-                    }
-                }
-            } else {
-                do {
-                    try await service.applyPatch(patch, auth: auth)
-                    await MainActor.run {
-                        isWorking = false
-                        Haptics.success()
-                        activeToast = ToastInfo(
-                            title: "Bật chức năng thành công",
-                            message: "Chức năng đang bật.",
-                            isSuccess: true
-                        )
-                    }
-                } catch {
-                    await MainActor.run {
-                        isWorking = false
-                        Haptics.error()
-                        activeToast = ToastInfo(
-                            title: "Không thể bật chức năng",
-                            message: (error as? LocalizedError)?.errorDescription
-                                ?? "Không thể hoàn tất thao tác (mã \((error as NSError).code)).",
-                            isSuccess: false
-                        )
-                    }
-                }
-            }
+            .accessibilityIdentifier("patch-toggle-\(patch.downloadIdentity)")
         }
     }
 

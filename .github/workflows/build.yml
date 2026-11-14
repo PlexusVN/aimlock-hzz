@@ -33,7 +33,7 @@ jobs:
           python3 -m unittest discover -s Tests -p 'test_*.py'
 
       - name: Verify native video loops and NavigationStack transparency
-        timeout-minutes: 8
+        timeout-minutes: 12
         run: |
           VIDEO_BACKGROUND_CHECK_OUTPUT="$RUNNER_TEMP/aimlock-video-native-check" \
             bash ReleaseTools/run_video_background_simulator_check.sh
@@ -42,7 +42,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: Aimlock-Hzz-Native-Video-Check-2.4-38
+          name: Aimlock-Hzz-Native-Video-Check-2.4-39
           path: ${{ runner.temp }}/aimlock-video-native-check/
           if-no-files-found: ignore
 
@@ -179,7 +179,7 @@ jobs:
           test -d "$APP_NAME"
           test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleDisplayName' "$APP_NAME/Info.plist")" = "Aimlock Hzz"
           test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$APP_NAME/Info.plist")" = "2.4"
-          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$APP_NAME/Info.plist")" = "38"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$APP_NAME/Info.plist")" = "39"
           python3 - "$APP_NAME" <<'PY'
           from pathlib import Path
           import hashlib, sys
@@ -236,5 +236,5 @@ jobs:
       - name: Upload IPA Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: Aimlock-Hzz-Unsigned-IPA-2.4-38
+          name: Aimlock-Hzz-Unsigned-IPA-2.4-39
           path: build/Aimlock-Hzz.ipa

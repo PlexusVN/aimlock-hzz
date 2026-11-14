@@ -50,6 +50,7 @@ func applicationStore() throws -> PatchEngineApplicationStore { Fixture.store }
             source += extract_function(coordinator, signature) + '\n'
         source += '}\n'
         feature = (ROOT / 'ThreeOneOSFive/helpers/FeaturePatchService.swift').read_text(encoding='utf-8')
+        source += feature[feature.index('struct PatchRestoreConfirmation:'):feature.index('struct PatchCategory:')]
         source += '''
 @MainActor final class FeaturePatchService {
 let defaults=UserDefaults.standard
@@ -57,8 +58,20 @@ var catalogApplications:CatalogPatchApplicationRegistry { CatalogPatchApplicatio
 var patchProjectsDir:URL { Fixture.root }
 var applicationRevision=0
 func patchStorageSlug(_ patch:PatchItem)->String { patch.identity }
+// Busy/inventory presentation has separate actual-method coverage in
+// test_catalog_recovery; this fixture keeps the original provenance scope.
+private func beginPatchOperation() {}
+private func endPatchOperation() {}
+private func refreshRecoveryItems() {}
+// Display metadata is an I/O boundary in this provenance fixture. The real
+// inventory/resolver and preference-loss cases run in test_catalog_recovery.
+private func readRecoveryMetadata() throws -> [CatalogRecoveryMetadata] { [] }
 '''
-        for signature in ['func restorePatch(', 'private func restorePatchInOperation(', 'func patchApplicationState(']:
+        for signature in ['func restorePatch(', 'private func restorePatchInOperation(',
+                          'private func withAuthenticatedPatchOperation<', 'private func catalogProjectID(',
+                          'private func activeCatalogProjectIDs(',
+                          'private func restoreReceipt(', 'private func restoreProjectInOperation(',
+                          'private func clearRestoredAssociations(', 'func patchApplicationState(']:
             source += extract_function(feature, signature) + '\n'
         source += '}\n'
         with tempfile.TemporaryDirectory() as directory:

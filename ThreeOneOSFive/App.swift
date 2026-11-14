@@ -242,13 +242,23 @@ class AppState: ObservableObject {
 
     private var autoRunAttempted = false
     private var isCheckingDirectAccess = false
+    private var didCheckDirectAccess = false
+
+    private func completeDirectAccessProbe(_ available: Bool) {
+        hasDirectDirectoryAccess = available
+        isCheckingDirectAccess = false
+        didCheckDirectAccess = true
+        // The direct probe owns the first decision. Do not launch a second
+        // access mechanism while its result is still pending.
+        maybeAutoRunKernelExploit()
+    }
 
     func checkDirectDirectoryAccessAsync() {
         // Probe only the selected 3105 route. Worse_query waits for its explicit
         // preparation gate; AirLift waits for pairing and transport checks.
         guard ExploitSupportPolicy.currentAccessProvider == .legacy3105 else { return }
         #if targetEnvironment(simulator)
-        DispatchQueue.main.async { self.hasDirectDirectoryAccess = true }
+        DispatchQueue.main.async { self.completeDirectAccessProbe(true) }
         #else
         guard !isCheckingDirectAccess else { return }
         isCheckingDirectAccess = true
@@ -259,18 +269,16 @@ class AppState: ObservableObject {
                     let docPath = (path as NSString).appendingPathComponent("Documents")
                     if FileManager.default.isWritableFile(atPath: docPath) {
                         DispatchQueue.main.async {
-                            self.hasDirectDirectoryAccess = true
-                            self.isCheckingDirectAccess = false
+                            self.completeDirectAccessProbe(true)
                         }
                         return
                     }
-                    let testFile = (docPath as NSString).appendingPathComponent(".novax_test")
+                    let testFile = (docPath as NSString).appendingPathComponent(".aimlock-access-\(UUID().uuidString).tmp")
                     do {
                         try "test".write(toFile: testFile, atomically: true, encoding: .utf8)
                         try? FileManager.default.removeItem(atPath: testFile)
                         DispatchQueue.main.async {
-                            self.hasDirectDirectoryAccess = true
-                            self.isCheckingDirectAccess = false
+                            self.completeDirectAccessProbe(true)
                         }
                         return
                     } catch {
@@ -279,8 +287,7 @@ class AppState: ObservableObject {
                 }
             }
             DispatchQueue.main.async {
-                self.hasDirectDirectoryAccess = false
-                self.isCheckingDirectAccess = false
+                self.completeDirectAccessProbe(false)
             }
         }
         #endif
@@ -361,7 +368,9 @@ class AppState: ObservableObject {
     }
 
     private func maybeAutoRunKernelExploit() {
-        guard !hasSandboxAccess && !hasDirectDirectoryAccess,
+        guard didCheckDirectAccess, !isCheckingDirectAccess,
+              kernelExploitApplicable,
+              !hasSandboxAccess && !hasDirectDirectoryAccess,
               !kernelExploitRunning,
               !exploitStatus.isSuccess,
               !exploitStatus.isFailed,

@@ -19,7 +19,7 @@
     <key>CFBundleShortVersionString</key>
     <string>2.4</string>
     <key>CFBundleVersion</key>
-    <string>38</string>
+    <string>39</string>
     <key>CFBundleDocumentTypes</key>
     <array>
         <dict>
@@ -119,7 +119,7 @@
         <string>fetch</string>
     </array>
     <key>NSLocalNetworkUsageDescription</key>
-    <string>Aimlock Hzz dÃ¹ng máº¡ng cá»¥c bá»™ Ä‘á»ƒ phÃ¡t host Remote Pairing trÃªn thiáº¿t bá»‹ vÃ  káº¿t ná»‘i dá»‹ch vá»¥ há»‡ thá»‘ng qua LocalDevVPN.</string>
+    <string>Aimlock Hzz dÃƒÂ¹ng mÃ¡ÂºÂ¡ng cÃ¡Â»Â¥c bÃ¡Â»â„¢ Ã„â€˜Ã¡Â»Æ’ phÃƒÂ¡t host Remote Pairing trÃƒÂªn thiÃ¡ÂºÂ¿t bÃ¡Â»â€¹ vÃƒÂ  kÃ¡ÂºÂ¿t nÃ¡Â»â€˜i dÃ¡Â»â€¹ch vÃ¡Â»Â¥ hÃ¡Â»â€¡ thÃ¡Â»â€˜ng qua LocalDevVPN.</string>
     <key>NSBonjourServices</key>
     <array>
         <string>_remotepairing-pairable-host._tcp</string>

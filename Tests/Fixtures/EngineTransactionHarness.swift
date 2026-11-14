@@ -51,7 +51,7 @@ struct FixturePublisher { func send() {} }
     var authenticationRevision:UInt64=0
 }
 enum FeaturePatchError:Error { case notAuthenticated }
-enum PatchRestoreError:Error { case missingReceipt }
+enum PatchRestoreError:Error { case missingReceipt, confirmationExpired, recoveryRequired }
 struct PatchItem { let identity:String }
 enum WorseQueryHelper {
     static let isAvailable=false
@@ -91,7 +91,8 @@ enum DevicePatchService {
     @MainActor static func recordedApplicationState(projectID:UUID) -> PatchApplicationState? { Fixture.journal }
     @MainActor static func latestReceipt(projectID:UUID)->PatchTransactionReceipt? { Fixture.receipt }
     @MainActor static func prepareContainers(receipt:PatchTransactionReceipt) async throws -> [String:URL] { [:] }
-    @MainActor static func restore(receipt:PatchTransactionReceipt,allowChangedTargets:Bool,preparedContainers:[String:URL]) throws {
+    @MainActor static func restore(receipt:PatchTransactionReceipt,allowChangedTargets:Bool,
+                                   expectedCurrentState:Data? = nil, preparedContainers:[String:URL]) throws {
         Fixture.restores += 1;Fixture.journal = .off
         if var record=try Fixture.store.read(receipt.projectID) { record.phase = .restored; try Fixture.store.save(record) }
     }

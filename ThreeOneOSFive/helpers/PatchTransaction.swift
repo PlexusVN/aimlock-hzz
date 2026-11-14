@@ -54,6 +54,12 @@ struct PatchTargetChange: Equatable, Sendable {
 
 struct PatchRestoreInspection: Equatable, Sendable {
     let changedTargets: [PatchTargetChange]
+    let currentStateSnapshot: Data?
+
+    init(changedTargets: [PatchTargetChange], currentStateSnapshot: Data? = nil) {
+        self.changedTargets = changedTargets
+        self.currentStateSnapshot = currentStateSnapshot
+    }
 }
 
 enum PatchApplicationState: Equatable {
@@ -281,6 +287,130 @@ struct CatalogPatchApplicationRegistry {
 }
 
 enum PatchTransaction {
+    /// Pins directories for one synchronous transaction. Every target lookup uses
+    /// openat without following links, and commit uses the pinned parent FD. A name
+    /// being replaced by another process can never redirect rename/unlink outside
+    /// the directory that was validated and backed up.
+    private final class PatchTargetFilesystem: NSObject {
+        private final class Directory {
+            let descriptor: Int32
+            init(_ descriptor: Int32) { self.descriptor = descriptor }
+            deinit { close(descriptor) }
+        }
+        var isRollingBack = false
+        private var roots: [String: Directory] = [:]
+        private var directories: [String: Directory] = [:]
+        private let previous: Any?
+        static let contextKey = "astra.patch.target-filesystem"
+
+        init(install: Bool) {
+            previous = Thread.current.threadDictionary[Self.contextKey]
+            super.init()
+            if install { Thread.current.threadDictionary[Self.contextKey] = self }
+        }
+        func finish() {
+            if let previous { Thread.current.threadDictionary[Self.contextKey] = previous }
+            else { Thread.current.threadDictionary.removeObject(forKey: Self.contextKey) }
+        }
+        private func failure() -> NSError { NSError(domain: NSPOSIXErrorDomain, code: Int(errno), userInfo: nil) }
+        private func openedDirectory(_ name: String, at parent: Int32) throws -> Directory {
+            let fd = openat(parent, name, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW)
+            guard fd >= 0 else { throw failure() }
+            return Directory(fd)
+        }
+        private func openAbsolute(_ path: String) throws -> Directory {
+            // The verified canonical container root may be accessible under a
+            // scoped grant even though its system-owned parents cannot be listed.
+            // Open that root directly, then walk only relative descendants below it.
+            try openedDirectory(path, at: AT_FDCWD)
+        }
+        func prepare(_ target: URL, root: URL, allowMissing: Bool) throws {
+            let rootPath = root.standardizedFileURL.path
+            if roots[rootPath] == nil {
+                let directory = try openAbsolute(rootPath)
+                roots[rootPath] = directory
+                directories[rootPath] = directory
+            }
+            _ = try parent(of: target, allowMissing: allowMissing)
+        }
+        func owns(_ url: URL) -> Bool {
+            roots.keys.contains { url.path.hasPrefix($0 + "/") }
+        }
+        func parent(of url: URL, allowMissing: Bool = false) throws -> Int32? {
+            let path = url.deletingLastPathComponent().standardizedFileURL.path
+            if let known = directories[path] { return known.descriptor }
+            guard let root = roots.keys.filter({ path == $0 || path.hasPrefix($0 + "/") }).max(by: { $0.count < $1.count }),
+                  var current = roots[root] else { throw PatchEngineStateError.invalidRecord }
+            var currentPath = root
+            for component in path.dropFirst(root.count).split(separator: "/") {
+                currentPath += "/" + component
+                if let known = directories[currentPath] { current = known; continue }
+                do {
+                    current = try openedDirectory(String(component), at: current.descriptor)
+                    directories[currentPath] = current
+                } catch {
+                    if allowMissing && errno == ENOENT { return nil }
+                    throw error
+                }
+            }
+            return current.descriptor
+        }
+        func statItem(_ url: URL) throws -> stat? {
+            guard let parent = try parent(of: url, allowMissing: true) else { return nil }
+            var metadata = stat()
+            guard fstatat(parent, url.lastPathComponent, &metadata, AT_SYMLINK_NOFOLLOW) == 0 else {
+                if errno == ENOENT { return nil }
+                throw failure()
+            }
+            guard isRollingBack || metadata.st_mode & mode_t(S_IFMT) != mode_t(S_IFLNK) else {
+                throw PatchPackageError.symbolicLinkUnsupported
+            }
+            return metadata
+        }
+        func openRead(_ url: URL) throws -> Int32 {
+            guard let parent = try parent(of: url) else { throw PatchEngineStateError.invalidRecord }
+            let fd = openat(parent, url.lastPathComponent, O_RDONLY | O_CLOEXEC | O_NOFOLLOW)
+            guard fd >= 0 else { throw failure() }
+            var metadata = stat()
+            guard fstat(fd, &metadata) == 0, metadata.st_mode & mode_t(S_IFMT) == mode_t(S_IFREG) else {
+                close(fd); throw PatchEngineStateError.invalidRecord
+            }
+            return fd
+        }
+        func createDirectory(_ url: URL) throws {
+            guard let parent = try parent(of: url) else { throw PatchEngineStateError.invalidRecord }
+            guard mkdirat(parent, url.lastPathComponent, mode_t(0o755)) == 0 else { throw failure() }
+            directories[url.path] = try openedDirectory(url.lastPathComponent, at: parent)
+        }
+        func remove(_ url: URL, directory: Bool = false) throws {
+            guard let parent = try parent(of: url, allowMissing: true) else { return }
+            guard unlinkat(parent, url.lastPathComponent, directory ? AT_REMOVEDIR : 0) == 0 else {
+                if errno == ENOENT { return }
+                throw failure()
+            }
+            if directory { directories.removeValue(forKey: url.path) }
+        }
+        func validateBindings() throws {
+            for (path, pinned) in directories {
+                guard let root = roots.keys.filter({ path == $0 || path.hasPrefix($0 + "/") }).max(by: { $0.count < $1.count }) else {
+                    throw PatchEngineStateError.invalidRecord
+                }
+                var current = try openAbsolute(root)
+                for component in path.dropFirst(root.count).split(separator: "/") {
+                    current = try openedDirectory(String(component), at: current.descriptor)
+                }
+                var expected = stat(), actual = stat()
+                guard fstat(pinned.descriptor, &expected) == 0, fstat(current.descriptor, &actual) == 0,
+                      expected.st_dev == actual.st_dev, expected.st_ino == actual.st_ino else {
+                    throw PatchEngineStateError.invalidRecord
+                }
+            }
+        }
+    }
+
+    private static var targetFilesystem: PatchTargetFilesystem? {
+        Thread.current.threadDictionary[PatchTargetFilesystem.contextKey] as? PatchTargetFilesystem
+    }
     private enum Status: String, Codable {
         case prepared
         case applied
@@ -304,6 +434,21 @@ enum PatchTransaction {
         let bundleID: String
         let relativePath: String
         let containerFingerprint: Data
+        let device: UInt64?
+        let inode: UInt64?
+
+        init(bundleID: String, relativePath: String, containerFingerprint: Data,
+             device: UInt64? = nil, inode: UInt64? = nil) {
+            self.bundleID = bundleID; self.relativePath = relativePath
+            self.containerFingerprint = containerFingerprint
+            self.device = device; self.inode = inode
+        }
+    }
+
+    private struct ResolvedCreatedDirectory {
+        let target: URL
+        let device: UInt64
+        let inode: UInt64
     }
 
     private struct Journal: Codable {
@@ -313,7 +458,7 @@ enum PatchTransaction {
         let createdAt: Date
         var status: Status
         let records: [Record]
-        let createdDirectories: [DirectoryRecord]?
+        var createdDirectories: [DirectoryRecord]?
     }
 
     private struct ResolvedRule {
@@ -348,6 +493,58 @@ enum PatchTransaction {
     private static let minimumSchemaVersion = 1
     private static let schemaVersion = 2
     private static let journalFilename = "journal.plist"
+    private static let prewriteFilename = ".prewrite.plist"
+    private struct PrewriteMarker: Codable {
+        let schema: Int
+        let projectID: UUID
+        let transactionID: UUID
+    }
+
+    private static func synchronizeDirectory(_ url: URL) throws {
+        let descriptor = open(url.path, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW)
+        guard descriptor >= 0 else { throw posixFailure() }
+        defer { close(descriptor) }
+        while fsync(descriptor) != 0 {
+            if errno == EINTR { continue }
+            throw posixFailure()
+        }
+    }
+
+    private static func writePrewriteMarker(projectID: UUID, transactionID: UUID, directory: URL) throws {
+        let encoder = PropertyListEncoder(); encoder.outputFormat = .binary
+        let url = directory.appendingPathComponent(prewriteFilename)
+        try encoder.encode(PrewriteMarker(schema: 1, projectID: projectID, transactionID: transactionID)).write(to: url, options: .atomic)
+        let descriptor = open(url.path, O_WRONLY | O_CLOEXEC | O_NOFOLLOW)
+        guard descriptor >= 0 else { throw posixFailure() }
+        defer { close(descriptor) }
+        while fsync(descriptor) != 0 {
+            if errno == EINTR { continue }
+            throw posixFailure()
+        }
+        try synchronizeDirectory(directory)
+    }
+
+    private static func finishPrewritePhase(directory: URL) throws {
+        // Remove and synchronize BEFORE any target mutation. An orphan backup
+        // with no valid marker is unknown state, never a new trusted baseline.
+        let marker = directory.appendingPathComponent(prewriteFilename)
+        guard unlink(marker.path) == 0 else { throw posixFailure() }
+        try synchronizeDirectory(directory)
+    }
+
+    private static func isSafePrewriteDirectory(_ directory: URL, projectID: UUID, fileManager: FileManager) -> Bool {
+        guard let contents = try? fileManager.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil) else { return false }
+        // Even an empty legacy transaction can have created new target files
+        // (private projects keep no applied payload and had no original file).
+        // Only an explicit durable no-mutation marker proves a harmless draft.
+        _ = contents
+        let url = directory.appendingPathComponent(prewriteFilename)
+        guard let data = try? Data(contentsOf: url), data.count <= 4096,
+              let marker = try? PropertyListDecoder().decode(PrewriteMarker.self, from: data),
+              marker.schema == 1, marker.projectID == projectID,
+              marker.transactionID.uuidString == directory.lastPathComponent else { return false }
+        return true
+    }
 
     static func apply(
         project: PatchProject,
@@ -355,12 +552,18 @@ enum PatchTransaction {
         engine: PatchWriteEngine = .legacy3105,
         containerResolver: (String) throws -> URL,
         beforeWrite: ((Int) throws -> Void)? = nil,
+        beforeDirectoryCreate: ((Int) throws -> Void)? = nil,
         fileManager: FileManager = .default
     ) throws -> PatchTransactionReceipt {
+        let targetScope = PatchTargetFilesystem(install: true)
+        defer { targetScope.finish() }
         try DirectPatchExecutionContext.check()
         guard !project.rules.isEmpty || !project.directories.isEmpty else {
             throw PatchPackageError.invalidProject
         }
+        // A damaged journal is unknown state, not evidence that a patch is OFF.
+        // Never take a new baseline from possibly patched bytes in that state.
+        try requireReadableTransactionHistory(backupRoot: backupRoot, fileManager: fileManager)
         guard latestReceipt(
             projectID: project.id,
             backupRoot: backupRoot,
@@ -472,13 +675,16 @@ enum PatchTransaction {
             .appendingPathComponent(transactionID.uuidString, isDirectory: true)
         do {
             try fileManager.createDirectory(at: transactionDirectory, withIntermediateDirectories: true)
+            try synchronizeDirectory(transactionDirectory.deletingLastPathComponent())
+            try synchronizeDirectory(backupRoot)
+            try writePrewriteMarker(projectID: project.id, transactionID: transactionID, directory: transactionDirectory)
         } catch {
             throw failedApply(error, operation: "backup-directory")
         }
 
         var records: [Record] = []
-        let createdDirectories = resolvedDirectories.compactMap { resolved -> DirectoryRecord? in
-            guard !fileManager.fileExists(atPath: resolved.target.path) else { return nil }
+        let plannedDirectories = try resolvedDirectories.compactMap { resolved -> DirectoryRecord? in
+            guard try !targetExists(resolved.target, fileManager: fileManager) else { return nil }
             return DirectoryRecord(
                 bundleID: resolved.bundleID,
                 relativePath: resolved.relativePath,
@@ -488,7 +694,7 @@ enum PatchTransaction {
         do {
             for resolved in resolvedRules {
                 try DirectPatchExecutionContext.check()
-                let existed = fileManager.fileExists(atPath: resolved.target.path)
+                let existed = try targetExists(resolved.target, fileManager: fileManager)
                 let backupFilename = existed ? "\(resolved.rule.id.uuidString).original" : nil
                 let appliedFilename = project.isPrivate
                     ? nil
@@ -496,7 +702,7 @@ enum PatchTransaction {
                 var originalDigest: Data?
                 if let backupFilename {
                     let backupURL = transactionDirectory.appendingPathComponent(backupFilename)
-                    try fileOperation("backup-copy") { try fileManager.copyItem(at: resolved.target, to: backupURL) }
+                    try fileOperation("backup-copy") { try atomicCopy(resolved.target, to: backupURL, fileManager: fileManager) }
                     originalDigest = try fileOperation("backup-read") { try digestFile(backupURL) }
                 }
                 let replacementDigest = digest(resolved.rule.replacementData)
@@ -533,7 +739,7 @@ enum PatchTransaction {
             createdAt: Date(),
             status: .prepared,
             records: records,
-            createdDirectories: createdDirectories
+            createdDirectories: plannedDirectories
         )
         do {
             try writeJournal(journal, to: journalURL)
@@ -545,18 +751,38 @@ enum PatchTransaction {
             engine: engine, baseline: .capturedPriorState, targetKeys: engineTargets, journalID: transactionID)
         // Save before the first target mutation. A failure here leaves the
         // prepared journal intact and no target has been written.
-        try fileOperation("provenance-write") { try engineStore.save(engineRecord) }
+        try fileOperation("provenance-write") { try saveEngineRecord(engineRecord, in: engineStore) }
+        try fileOperation("prewrite-finish") { try finishPrewritePhase(directory: transactionDirectory) }
 
+        var attemptedRecords: [Record] = []
+        var actualCreatedDirectories: [DirectoryRecord] = []
+        let missingKeys = Set(plannedDirectories.map { $0.bundleID + "\0" + $0.relativePath })
         do {
-            for resolved in resolvedDirectories where !fileManager.fileExists(atPath: resolved.target.path) {
+            for (index, resolved) in resolvedDirectories.filter({ missingKeys.contains($0.bundleID + "\0" + $0.relativePath) }).enumerated() {
                 try DirectPatchExecutionContext.check()
+                try beforeDirectoryCreate?(index)
+                try DirectPatchExecutionContext.check()
+                // Another process creating a planned-missing name does not
+                // transfer ownership of that directory to this transaction.
+                guard try !targetExists(resolved.target, fileManager: fileManager) else { throw PatchEngineStateError.recoveryRequired }
                 try fileOperation("target-directory-create") {
-                    try fileManager.createDirectory(at: resolved.target, withIntermediateDirectories: false)
+                    try targetFilesystem!.createDirectory(resolved.target)
                 }
+                guard let metadata = try targetFilesystem?.statItem(resolved.target),
+                      metadata.st_mode & mode_t(S_IFMT) == mode_t(S_IFDIR) else { throw PatchEngineStateError.invalidRecord }
+                actualCreatedDirectories.append(DirectoryRecord(bundleID: resolved.bundleID,
+                    relativePath: resolved.relativePath, containerFingerprint: containerFingerprint(resolved.containerRoot),
+                    device: UInt64(truncatingIfNeeded: metadata.st_dev), inode: UInt64(truncatingIfNeeded: metadata.st_ino)))
             }
+            journal.createdDirectories = actualCreatedDirectories
+            // A crash before this durable update leaves only unknown planned
+            // directories, which recovery preserves instead of claiming them.
+            try writeJournal(journal, to: journalURL)
             for (index, resolved) in resolvedRules.enumerated() {
                 try DirectPatchExecutionContext.check()
                 try beforeWrite?(index)
+                try DirectPatchExecutionContext.check()
+                attemptedRecords.append(records[index])
                 try atomicWrite(
                     resolved.rule.replacementData,
                     to: resolved.target,
@@ -568,10 +794,11 @@ enum PatchTransaction {
                 }
             }
             try DirectPatchExecutionContext.check()
+            try targetFilesystem?.validateBindings()
             journal.status = .applied
             try writeJournal(journal, to: journalURL)
             engineRecord.phase = .applied
-            try fileOperation("provenance-write") { try engineStore.save(engineRecord) }
+            try fileOperation("provenance-write") { try saveEngineRecord(engineRecord, in: engineStore) }
             return PatchTransactionReceipt(
                 id: transactionID,
                 projectID: project.id,
@@ -580,18 +807,21 @@ enum PatchTransaction {
         } catch {
             var failure = filesystemFailure(error, operation: "transaction-write")
             do {
+                targetFilesystem?.isRollingBack = true
+                defer { targetFilesystem?.isRollingBack = false }
                 try restoreRecords(
-                    records,
+                    attemptedRecords,
                     transactionDirectory: transactionDirectory,
                     roots: roots,
                     requirePatchedDigest: false,
-                    createdDirectories: createdDirectories,
+                    createdDirectories: actualCreatedDirectories,
                     fileManager: fileManager
                 )
+                journal.createdDirectories = actualCreatedDirectories
                 journal.status = .rolledBack
                 try writeJournal(journal, to: journalURL)
                 engineRecord.phase = .restored
-                try engineStore.save(engineRecord)
+                try saveEngineRecord(engineRecord, in: engineStore)
                 failure?.rollbackCompleted = true
             } catch {
                 // Preserve the prepared journal and backups for explicit recovery.
@@ -599,7 +829,7 @@ enum PatchTransaction {
                     failure = filesystemFailure(error, operation: "rollback")
                 }
                 engineRecord.phase = .recoveryRequired
-                try? engineStore.save(engineRecord)
+                try? saveEngineRecord(engineRecord, in: engineStore)
                 failure?.rollbackCompleted = false
             }
             if let failure { throw failure }
@@ -612,6 +842,8 @@ enum PatchTransaction {
         containerResolver: (String) throws -> URL,
         fileManager: FileManager = .default
     ) throws -> PatchRestoreInspection {
+        let targetScope = PatchTargetFilesystem(install: true)
+        defer { targetScope.finish() }
         let backupRoot = receipt.journalURL.deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
         let store = PatchEngineApplicationStore(backupRoot: backupRoot)
         try PatchEngineApplicationStore.requireDirectRestore(record: try store.read(receipt.projectID), receiptID: receipt.id,
@@ -619,9 +851,6 @@ enum PatchTransaction {
             legacyAirLift: UserDefaults.standard.bool(forKey: "airlift.applied.\(receipt.projectID.uuidString)"))
         do {
             let journal = try activeJournal(for: receipt)
-            guard journal.status == .applied else {
-                return PatchRestoreInspection(changedTargets: [])
-            }
             let roots = try resolvedRoots(
                 journal: journal,
                 containerResolver: containerResolver
@@ -630,10 +859,12 @@ enum PatchTransaction {
                 journal.records,
                 transactionDirectory: receipt.journalURL.deletingLastPathComponent(),
                 roots: roots,
+                allowMissingParents: journal.status == .prepared,
                 fileManager: fileManager
             )
             return PatchRestoreInspection(
-                changedTargets: try changedTargets(in: resolved, fileManager: fileManager)
+                changedTargets: try restoreChanges(in: resolved, prepared: journal.status == .prepared, fileManager: fileManager),
+                currentStateSnapshot: try currentStateSnapshot(receipt: receipt, resolved: resolved, fileManager: fileManager)
             )
         } catch {
             throw PatchPackageError.restoreFailed
@@ -643,10 +874,13 @@ enum PatchTransaction {
     static func restore(
         receipt: PatchTransactionReceipt,
         allowChangedTargets: Bool = false,
+        expectedCurrentState: Data? = nil,
         containerResolver: (String) throws -> URL,
         beforeWrite: ((Int) throws -> Void)? = nil,
         fileManager: FileManager = .default
     ) throws {
+        let targetScope = PatchTargetFilesystem(install: true)
+        defer { targetScope.finish() }
         let backupRoot = receipt.journalURL.deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
         let engineStore = PatchEngineApplicationStore(backupRoot: backupRoot)
         let engineRecord = try engineStore.read(receipt.projectID)
@@ -667,9 +901,11 @@ enum PatchTransaction {
                 allowMissingParents: journal.status == .prepared,
                 fileManager: fileManager
             )
-            let changes = journal.status == .applied
-                ? try changedTargets(in: resolved, fileManager: fileManager)
-                : []
+            let changes = try restoreChanges(in: resolved, prepared: journal.status == .prepared, fileManager: fileManager)
+            if let expectedCurrentState,
+               try currentStateSnapshot(receipt: receipt, resolved: resolved, fileManager: fileManager) != expectedCurrentState {
+                throw PatchPackageError.restoreTargetsChanged(resolved.map { $0.record.bundleID + "/" + $0.record.relativePath })
+            }
             if !changes.isEmpty, !allowChangedTargets {
                 throw PatchPackageError.restoreTargetsChanged(changes.map(\.displayPath))
             }
@@ -679,24 +915,37 @@ enum PatchTransaction {
                 fileManager: fileManager
             )
 
+            let capturedTargetStates = try Dictionary(uniqueKeysWithValues: resolved.map {
+                ($0.target.path, try fileStateDigest($0.target, fileManager: fileManager))
+            })
             try withCurrentStateRecovery(
                 resolved,
                 transactionDirectory: transactionDirectory,
                 fileManager: fileManager
-            ) {
+            ) { willMutate in
+                if let expectedCurrentState,
+                   try currentStateSnapshot(receipt: receipt, resolved: resolved, fileManager: fileManager) != expectedCurrentState {
+                    throw PatchPackageError.restoreTargetsChanged(resolved.map { $0.record.bundleID + "/" + $0.record.relativePath })
+                }
                 for (index, item) in resolved.reversed().enumerated() {
                     try DirectPatchExecutionContext.check()
                     try beforeWrite?(index)
+                    try DirectPatchExecutionContext.check()
+                    guard try fileStateDigest(item.target, fileManager: fileManager) == capturedTargetStates[item.target.path] else {
+                        throw PatchPackageError.restoreTargetsChanged([item.record.bundleID + "/" + item.record.relativePath])
+                    }
+                    willMutate(item.target)
                     if item.record.originalExisted {
                         let backup = transactionDirectory.appendingPathComponent(
                             item.record.backupFilename!
                         )
                         try atomicCopy(backup, to: item.target, fileManager: fileManager)
-                    } else if fileManager.fileExists(atPath: item.target.path) {
-                        try fileManager.removeItem(at: item.target)
+                    } else if try targetExists(item.target, fileManager: fileManager) {
+                        try removeTarget(item.target, fileManager: fileManager)
                     }
                 }
                 try DirectPatchExecutionContext.check()
+                try targetFilesystem?.validateBindings()
                 journal.status = .restored
                 try writeJournal(journal, to: receipt.journalURL)
             }
@@ -707,7 +956,7 @@ enum PatchTransaction {
                 targetKeys: journal.records.map { $0.bundleID + "\0" + $0.relativePath }
                     + (journal.createdDirectories ?? []).map { $0.bundleID + "\0" + $0.relativePath }, journalID: receipt.id)
             restored.phase = .restored
-            try engineStore.save(restored)
+            try saveEngineRecord(restored, in: engineStore)
         } catch let error as PatchPackageError {
             if case .restoreTargetsChanged = error { throw error }
             throw PatchPackageError.restoreFailed
@@ -723,6 +972,8 @@ enum PatchTransaction {
         beforeWrite: ((Int) throws -> Void)? = nil,
         fileManager: FileManager = .default
     ) throws {
+        let targetScope = PatchTargetFilesystem(install: true)
+        defer { targetScope.finish() }
         let backupRoot = receipt.journalURL.deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
         let store = PatchEngineApplicationStore(backupRoot: backupRoot)
         try PatchEngineApplicationStore.requireDirectRestore(record: try store.read(receipt.projectID), receiptID: receipt.id,
@@ -769,9 +1020,12 @@ enum PatchTransaction {
                 resolved,
                 transactionDirectory: transactionDirectory,
                 fileManager: fileManager
-            ) {
+            ) { willMutate in
                 for (index, item) in resolved.enumerated() {
+                    try DirectPatchExecutionContext.check()
                     try beforeWrite?(index)
+                    try DirectPatchExecutionContext.check()
+                    willMutate(item.target)
                     switch sources[index] {
                     case .file(let source):
                         try atomicCopy(
@@ -792,6 +1046,8 @@ enum PatchTransaction {
                         throw PatchPackageError.resetFailed
                     }
                 }
+                try DirectPatchExecutionContext.check()
+                try targetFilesystem?.validateBindings()
             }
         } catch {
             throw PatchPackageError.resetFailed
@@ -810,12 +1066,18 @@ enum PatchTransaction {
             options: [.skipsHiddenFiles]
         ) else { return nil }
 
-        let validJournals: [(journal: Journal, url: URL)] = directories.compactMap { directory in
+        var validJournals: [(journal: Journal, url: URL)] = []
+        for directory in directories {
             let url = directory.appendingPathComponent(journalFilename)
+            guard fileManager.fileExists(atPath: url.path) else {
+                if !isSafePrewriteDirectory(directory, projectID: projectID, fileManager: fileManager) { return nil }
+                continue
+            }
             guard let journal = try? readJournal(url),
                   (minimumSchemaVersion...schemaVersion).contains(journal.schemaVersion),
-                  journal.status == .applied || journal.status == .prepared else { return nil }
-            return (journal, url)
+                  journal.projectID == projectID,
+                  directory.lastPathComponent == journal.transactionID.uuidString else { return nil }
+            if journal.status == .applied || journal.status == .prepared { validJournals.append((journal, url)) }
         }
 
         guard let latest = validJournals.sorted(by: { $0.journal.createdAt > $1.journal.createdAt }).first else {
@@ -837,19 +1099,75 @@ enum PatchTransaction {
     static func latestRecordedApplicationState(projectID: UUID, backupRoot: URL,
                                                fileManager: FileManager = .default) -> PatchApplicationState? {
         let directory = backupRoot.appendingPathComponent(projectID.uuidString, isDirectory: true)
+        guard fileManager.fileExists(atPath: directory.path) else { return nil }
         guard let transactions = try? fileManager.contentsOfDirectory(at: directory,
-            includingPropertiesForKeys: nil, options: [.skipsHiddenFiles]) else { return nil }
-        let journals = transactions.compactMap { transaction -> Journal? in
-            guard let journal = try? readJournal(transaction.appendingPathComponent(journalFilename)),
+            includingPropertiesForKeys: nil, options: [.skipsHiddenFiles]) else { return .recoveryRequired }
+        var journals: [Journal] = []
+        for transaction in transactions {
+            let url = transaction.appendingPathComponent(journalFilename)
+            guard fileManager.fileExists(atPath: url.path) else {
+                if !isSafePrewriteDirectory(transaction, projectID: projectID, fileManager: fileManager) { return .recoveryRequired }
+                continue
+            }
+            guard let journal = try? readJournal(url),
                   (minimumSchemaVersion...schemaVersion).contains(journal.schemaVersion),
-                  journal.projectID == projectID, transaction.lastPathComponent == journal.transactionID.uuidString else { return nil }
-            return journal
+                  journal.projectID == projectID, transaction.lastPathComponent == journal.transactionID.uuidString else {
+                return .recoveryRequired
+            }
+            journals.append(journal)
         }
-        guard let journal = journals.max(by: { $0.createdAt < $1.createdAt }) else { return nil }
+        guard let journal = journals.max(by: { $0.createdAt < $1.createdAt }) else {
+            do {
+                if let record = try PatchEngineApplicationStore(backupRoot: backupRoot).read(projectID),
+                   record.phase != .restored { return .recoveryRequired }
+            } catch { return .recoveryRequired }
+            return nil
+        }
         switch journal.status {
         case .applied: return .applied
         case .prepared: return .recoveryRequired
         case .restored, .rolledBack: return .off
+        }
+    }
+
+    private static func requireReadableTransactionHistory(backupRoot: URL, fileManager: FileManager) throws {
+        guard fileManager.fileExists(atPath: backupRoot.path) else { return }
+        let projects = try fileManager.contentsOfDirectory(at: backupRoot,
+            includingPropertiesForKeys: nil, options: [.skipsHiddenFiles])
+        for project in projects {
+            guard let projectID = UUID(uuidString: project.lastPathComponent) else { continue }
+            for transaction in try fileManager.contentsOfDirectory(at: project,
+                includingPropertiesForKeys: nil, options: [.skipsHiddenFiles]) {
+                let url = transaction.appendingPathComponent(journalFilename)
+                guard fileManager.fileExists(atPath: url.path) else {
+                    guard isSafePrewriteDirectory(transaction, projectID: projectID, fileManager: fileManager) else {
+                        throw PatchEngineStateError.invalidRecord
+                    }
+                    continue
+                }
+                guard let journal = try? readJournal(url),
+                      (minimumSchemaVersion...schemaVersion).contains(journal.schemaVersion),
+                      journal.projectID == projectID,
+                      transaction.lastPathComponent == journal.transactionID.uuidString else {
+                    throw PatchEngineStateError.invalidRecord
+                }
+            }
+        }
+        let records = backupRoot.appendingPathComponent(".engine-applications", isDirectory: true)
+        guard fileManager.fileExists(atPath: records.path) else { return }
+        let store = PatchEngineApplicationStore(backupRoot: backupRoot)
+        for url in try fileManager.contentsOfDirectory(at: records, includingPropertiesForKeys: nil) where url.pathExtension == "plist" {
+            guard let projectID = UUID(uuidString: url.deletingPathExtension().lastPathComponent),
+                  let record = try store.read(projectID) else { throw PatchEngineStateError.invalidRecord }
+            guard record.engine != .airLift, record.phase != .restored else { continue }
+            guard let journalID = record.journalID else { throw PatchEngineStateError.invalidRecord }
+            let journalURL = backupRoot.appendingPathComponent(projectID.uuidString, isDirectory: true)
+                .appendingPathComponent(journalID.uuidString, isDirectory: true).appendingPathComponent(journalFilename)
+            guard let journal = try? readJournal(journalURL),
+                  (minimumSchemaVersion...schemaVersion).contains(journal.schemaVersion),
+                  journal.projectID == projectID, journal.transactionID == journalID else {
+                throw PatchEngineStateError.invalidRecord
+            }
         }
     }
 
@@ -861,6 +1179,8 @@ enum PatchTransaction {
         containerResolver: (String) throws -> URL,
         fileManager: FileManager = .default
     ) throws -> PatchApplicationState {
+        let targetScope = PatchTargetFilesystem(install: true)
+        defer { targetScope.finish() }
         let journal = try activeJournal(for: receipt)
         guard project.id == journal.projectID else { throw PatchPackageError.invalidProject }
         guard journal.status == .applied, journal.records.count == project.rules.count,
@@ -996,7 +1316,7 @@ enum PatchTransaction {
         fileManager: FileManager
     ) throws -> [PatchTargetChange] {
         try resolved.compactMap { item in
-            guard fileManager.fileExists(atPath: item.target.path) else {
+            guard try targetExists(item.target, fileManager: fileManager) else {
                 return PatchTargetChange(
                     bundleID: item.record.bundleID,
                     relativePath: item.record.relativePath,
@@ -1014,29 +1334,41 @@ enum PatchTransaction {
         }
     }
 
+    private static func restoreChanges(in resolved: [ResolvedRecord], prepared: Bool,
+                                       fileManager: FileManager) throws -> [PatchTargetChange] {
+        guard prepared else { return try changedTargets(in: resolved, fileManager: fileManager) }
+        // An interrupted prepared transaction may contain either the verified
+        // original or replacement bytes. A third state is a later edit and
+        // needs the same explicit confirmation as an applied transaction.
+        return try resolved.compactMap { item in
+            if try !targetExists(item.target, fileManager: fileManager) {
+                return item.record.originalExisted
+                    ? PatchTargetChange(bundleID: item.record.bundleID, relativePath: item.record.relativePath, kind: .missing)
+                    : nil
+            }
+            let current = try digestFile(item.target)
+            if current == item.record.replacementDigest || (item.record.originalExisted && current == item.record.originalDigest) { return nil }
+            return PatchTargetChange(bundleID: item.record.bundleID, relativePath: item.record.relativePath, kind: .modified)
+        }
+    }
+
     private static func resolvedCreatedDirectories(
-        _ directories: [DirectoryRecord],
-        roots: [String: URL],
-        fileManager: FileManager
-    ) throws -> [URL] {
-        try directories.map { directory in
-            guard let root = roots[directory.bundleID],
-                  containerFingerprint(root) == directory.containerFingerprint else {
+        _ directories: [DirectoryRecord], roots: [String: URL], fileManager: FileManager
+    ) throws -> [ResolvedCreatedDirectory] {
+        try directories.compactMap { directory in
+            guard let device = directory.device, let inode = directory.inode else { return nil }
+            guard let root = roots[directory.bundleID], containerFingerprint(root) == directory.containerFingerprint else {
                 throw PatchPackageError.restoreFailed
             }
-            let target = try PatchPathValidator.resolveContainedTargetURL(
-                relativePath: directory.relativePath,
-                containerRoot: root
-            )
-            if fileManager.fileExists(atPath: target.path) {
-                let values = try target.resourceValues(
-                    forKeys: [.isDirectoryKey, .isSymbolicLinkKey]
-                )
-                guard values.isSymbolicLink != true, values.isDirectory == true else {
-                    throw PatchPackageError.restoreFailed
-                }
-            }
-            return target
+            let relative = try PatchPathValidator.canonicalRelativePath(directory.relativePath)
+            let target = root.appendingPathComponent(relative).standardizedFileURL
+            guard let filesystem = targetFilesystem else { return nil }
+            try filesystem.prepare(target, root: root, allowMissing: true)
+            guard let metadata = try? filesystem.statItem(target),
+                  metadata.st_mode & mode_t(S_IFMT) == mode_t(S_IFDIR),
+                  UInt64(truncatingIfNeeded: metadata.st_dev) == device,
+                  UInt64(truncatingIfNeeded: metadata.st_ino) == inode else { return nil }
+            return ResolvedCreatedDirectory(target: target, device: device, inode: inode)
         }
     }
 
@@ -1044,7 +1376,7 @@ enum PatchTransaction {
         _ resolved: [ResolvedRecord],
         transactionDirectory: URL,
         fileManager: FileManager,
-        operation: () throws -> Void
+        operation: (_ willMutate: (URL) -> Void) throws -> Void
     ) throws {
         let recoveryDirectory = transactionDirectory.appendingPathComponent(
             ".recovery-\(UUID().uuidString)",
@@ -1054,7 +1386,7 @@ enum PatchTransaction {
         var snapshots: [CurrentFileSnapshot] = []
         do {
             for (index, item) in resolved.enumerated() {
-                guard fileManager.fileExists(atPath: item.target.path) else {
+                guard try targetExists(item.target, fileManager: fileManager) else {
                     snapshots.append(CurrentFileSnapshot(
                         target: item.target,
                         existed: false,
@@ -1063,7 +1395,7 @@ enum PatchTransaction {
                     continue
                 }
                 let snapshotURL = recoveryDirectory.appendingPathComponent("\(index).current")
-                try fileManager.copyItem(at: item.target, to: snapshotURL)
+                try atomicCopy(item.target, to: snapshotURL, fileManager: fileManager)
                 guard try digestFile(snapshotURL) == digestFile(item.target) else {
                     throw PatchPackageError.restoreFailed
                 }
@@ -1078,15 +1410,18 @@ enum PatchTransaction {
             throw error
         }
 
+        var attemptedTargets = Set<String>()
         do {
-            try operation()
+            try operation { attemptedTargets.insert($0.path) }
         } catch {
             do {
-                for snapshot in snapshots.reversed() {
+                targetFilesystem?.isRollingBack = true
+                defer { targetFilesystem?.isRollingBack = false }
+                for snapshot in snapshots.reversed() where attemptedTargets.contains(snapshot.target.path) {
                     if snapshot.existed, let snapshotURL = snapshot.snapshotURL {
                         try atomicCopy(snapshotURL, to: snapshot.target, fileManager: fileManager)
-                    } else if fileManager.fileExists(atPath: snapshot.target.path) {
-                        try fileManager.removeItem(at: snapshot.target)
+                    } else if try targetExists(snapshot.target, fileManager: fileManager) {
+                        try removeTarget(snapshot.target, fileManager: fileManager)
                     }
                 }
                 try? fileManager.removeItem(at: recoveryDirectory)
@@ -1099,20 +1434,17 @@ enum PatchTransaction {
         try? fileManager.removeItem(at: recoveryDirectory)
     }
 
-    private static func removeEmptyCreatedDirectories(
-        _ directories: [URL],
-        fileManager: FileManager
-    ) {
+    private static func removeEmptyCreatedDirectories(_ directories: [ResolvedCreatedDirectory], fileManager: FileManager) {
         for directory in directories.reversed() {
-            guard fileManager.fileExists(atPath: directory.path),
-                  let values = try? directory.resourceValues(
-                    forKeys: [.isDirectoryKey, .isSymbolicLinkKey]
-                  ),
-                  values.isSymbolicLink != true,
-                  values.isDirectory == true,
-                  let contents = try? fileManager.contentsOfDirectory(atPath: directory.path),
-                  contents.isEmpty else { continue }
-            try? fileManager.removeItem(at: directory)
+            guard let filesystem = targetFilesystem, filesystem.owns(directory.target),
+                  let metadata = try? filesystem.statItem(directory.target),
+                  metadata.st_mode & mode_t(S_IFMT) == mode_t(S_IFDIR),
+                  UInt64(truncatingIfNeeded: metadata.st_dev) == directory.device,
+                  UInt64(truncatingIfNeeded: metadata.st_ino) == directory.inode else { continue }
+            // Never recurse. Identity is rechecked immediately before unlink,
+            // but POSIX does not offer an inode-conditional unlink primitive;
+            // a noncooperating process can still replace a leaf in this window.
+            try? filesystem.remove(directory.target, directory: true)
         }
     }
 
@@ -1124,43 +1456,19 @@ enum PatchTransaction {
         createdDirectories: [DirectoryRecord],
         fileManager: FileManager
     ) throws {
-        var createdDirectoryURLs: [URL] = []
-        for directory in createdDirectories {
-            guard let root = roots[directory.bundleID],
-                  containerFingerprint(root) == directory.containerFingerprint else {
-                throw PatchPackageError.restoreFailed
-            }
-            let target = try PatchPathValidator.resolveContainedTargetURL(
-                relativePath: directory.relativePath,
-                containerRoot: root
-            )
-            if fileManager.fileExists(atPath: target.path) {
-                let values = try target.resourceValues(
-                    forKeys: [.isDirectoryKey, .isSymbolicLinkKey]
-                )
-                guard values.isSymbolicLink != true, values.isDirectory == true else {
-                    throw PatchPackageError.restoreFailed
-                }
-            }
-            createdDirectoryURLs.append(target)
-        }
+        let createdDirectoryURLs = try resolvedCreatedDirectories(createdDirectories, roots: roots, fileManager: fileManager)
 
         for record in records.reversed() {
             guard let root = roots[record.bundleID],
                   containerFingerprint(root) == record.containerFingerprint else {
                 throw PatchPackageError.restoreFailed
             }
-            let target = try PatchPathValidator.resolveContainedTargetURL(
-                relativePath: record.relativePath,
-                containerRoot: root
-            )
-            try validateFileTarget(
-                target,
-                relativePath: record.relativePath,
-                containerRoot: root,
-                allowMissingParents: true,
-                fileManager: fileManager
-            )
+            let relative = try PatchPathValidator.canonicalRelativePath(record.relativePath)
+            let target = root.appendingPathComponent(relative).standardizedFileURL
+            if targetFilesystem?.isRollingBack != true {
+                try validateFileTarget(target, relativePath: record.relativePath, containerRoot: root,
+                                       allowMissingParents: true, fileManager: fileManager)
+            }
 
             if record.originalExisted {
                 guard let backupFilename = record.backupFilename,
@@ -1173,7 +1481,7 @@ enum PatchTransaction {
                     throw PatchPackageError.restoreFailed
                 }
                 if requirePatchedDigest {
-                    guard fileManager.fileExists(atPath: target.path),
+                    guard try targetExists(target, fileManager: fileManager),
                           try digestFile(target) == record.replacementDigest else {
                         throw PatchPackageError.restoreFailed
                     }
@@ -1181,28 +1489,18 @@ enum PatchTransaction {
                 try atomicCopy(backup, to: target, fileManager: fileManager)
             } else {
                 if requirePatchedDigest {
-                    guard fileManager.fileExists(atPath: target.path),
+                    guard try targetExists(target, fileManager: fileManager),
                           try digestFile(target) == record.replacementDigest else {
                         throw PatchPackageError.restoreFailed
                     }
                 }
-                if fileManager.fileExists(atPath: target.path) {
-                    try fileManager.removeItem(at: target)
+                if try targetExists(target, fileManager: fileManager) {
+                    try removeTarget(target, fileManager: fileManager)
                 }
             }
         }
 
-        for directory in createdDirectoryURLs.reversed() {
-            guard fileManager.fileExists(atPath: directory.path),
-                  let values = try? directory.resourceValues(
-                    forKeys: [.isDirectoryKey, .isSymbolicLinkKey]
-                  ),
-                  values.isSymbolicLink != true,
-                  values.isDirectory == true,
-                  let contents = try? fileManager.contentsOfDirectory(atPath: directory.path),
-                  contents.isEmpty else { continue }
-            try? fileManager.removeItem(at: directory)
-        }
+        removeEmptyCreatedDirectories(createdDirectoryURLs, fileManager: fileManager)
     }
 
     private static func validateFileTarget(
@@ -1212,6 +1510,7 @@ enum PatchTransaction {
         allowMissingParents: Bool,
         fileManager: FileManager
     ) throws {
+        try targetFilesystem?.prepare(target, root: containerRoot, allowMissing: allowMissingParents)
         let components = try PatchPathValidator.canonicalRelativePath(relativePath)
             .split(separator: "/")
             .map(String.init)
@@ -1230,7 +1529,7 @@ enum PatchTransaction {
                 throw PatchPackageError.applyFailed
             }
         }
-        if fileManager.fileExists(atPath: target.path) {
+        if try targetExists(target, fileManager: fileManager) {
             let values = try target.resourceValues(forKeys: [.isDirectoryKey, .isSymbolicLinkKey])
             guard values.isSymbolicLink != true else {
                 throw PatchPackageError.symbolicLinkUnsupported
@@ -1247,6 +1546,7 @@ enum PatchTransaction {
         containerRoot: URL,
         fileManager: FileManager
     ) throws {
+        try targetFilesystem?.prepare(target, root: containerRoot, allowMissing: true)
         let components = try PatchPathValidator.canonicalRelativePath(relativePath)
             .split(separator: "/").map(String.init)
         var cursor = PatchPathValidator.canonicalFileURL(containerRoot)
@@ -1261,7 +1561,7 @@ enum PatchTransaction {
                 throw PatchPackageError.applyFailed
             }
         }
-        if fileManager.fileExists(atPath: target.path) {
+        if try targetExists(target, fileManager: fileManager) {
             let values = try target.resourceValues(forKeys: [.isDirectoryKey, .isSymbolicLinkKey])
             guard values.isSymbolicLink != true, values.isDirectory == true else {
                 throw PatchPackageError.applyFailed
@@ -1275,37 +1575,66 @@ enum PatchTransaction {
         return leftDepth == rightDepth ? lhs < rhs : leftDepth < rightDepth
     }
 
+    private static func targetExists(_ url: URL, fileManager: FileManager) throws -> Bool {
+        if let filesystem = targetFilesystem, filesystem.owns(url) { return try filesystem.statItem(url) != nil }
+        return fileManager.fileExists(atPath: url.path)
+    }
+
+    private static func openRead(_ url: URL) throws -> Int32 {
+        if let filesystem = targetFilesystem, filesystem.owns(url) { return try filesystem.openRead(url) }
+        let fd = open(url.path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW)
+        guard fd >= 0 else { throw posixFailure() }
+        return fd
+    }
+
+    private static func removeTarget(_ url: URL, fileManager: FileManager) throws {
+        if let filesystem = targetFilesystem, filesystem.owns(url) { try filesystem.remove(url) }
+        else { try fileManager.removeItem(at: url) }
+    }
+
+    private static func stageParent(_ target: URL) throws -> Int32 {
+        if let filesystem = targetFilesystem, filesystem.owns(target), let fd = try filesystem.parent(of: target) {
+            let result = dup(fd)
+            guard result >= 0 else { throw posixFailure() }
+            return result
+        }
+        let fd = open(target.deletingLastPathComponent().path, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW)
+        guard fd >= 0 else { throw posixFailure() }
+        return fd
+    }
+
+    private static func copyMetadata(from source: Int32, to destination: Int32) throws {
+#if canImport(Darwin)
+        guard fcopyfile(source, destination, nil, copyfile_flags_t(COPYFILE_METADATA)) == 0 else { throw posixFailure() }
+#else
+        var metadata = stat()
+        guard fstat(source, &metadata) == 0, fchmod(destination, mode_t(metadata.st_mode & 0o7777)) == 0 else { throw posixFailure() }
+#endif
+    }
+
     private static func atomicWrite(
         _ data: Data,
         to target: URL,
         preservingExistingAttributes: Bool,
         fileManager: FileManager
     ) throws {
-        let staging = target.deletingLastPathComponent()
-            .appendingPathComponent(".3105-patch-\(UUID().uuidString)")
-        var attributes: [FileAttributeKey: Any] = [:]
-        if preservingExistingAttributes,
-           let current = try? fileManager.attributesOfItem(atPath: target.path) {
-            if let permissions = current[.posixPermissions] { attributes[.posixPermissions] = permissions }
-            if let protection = current[.protectionKey] { attributes[.protectionKey] = protection }
-        }
-        let created = try createWritableStage(staging)
+        if targetFilesystem?.isRollingBack != true { try targetFilesystem?.validateBindings() }
+        let parent = try stageParent(target)
+        defer { close(parent) }
+        let name = ".3105-patch-\(UUID().uuidString)"
+        let created = try createWritableStage(name, at: parent)
         var descriptor = created.descriptor
-        defer {
-            if descriptor >= 0 { close(descriptor) }
-            try? fileManager.removeItem(at: staging)
-        }
-        if attributes[.posixPermissions] == nil {
-            attributes[.posixPermissions] = NSNumber(value: Int(created.defaultPermissions))
-        }
+        defer { if descriptor >= 0 { close(descriptor) }; unlinkat(parent, name, 0) }
         try fileOperation("staging-write") { try writeAll(data, to: descriptor) }
-        // The descriptor remains writable even when final metadata makes the
-        // file read-only. Never reopen a 0444 stage just to synchronize it.
-        if !attributes.isEmpty {
-            try fileOperation("staging-attributes") { try fileManager.setAttributes(attributes, ofItemAtPath: staging.path) }
+        if preservingExistingAttributes, try targetExists(target, fileManager: fileManager) {
+            let source = try openRead(target)
+            defer { close(source) }
+            try fileOperation("staging-attributes") { try copyMetadata(from: source, to: descriptor) }
+        } else {
+            guard fchmod(descriptor, created.defaultPermissions) == 0 else { throw posixFailure() }
         }
         try synchronizeAndClose(&descriptor)
-        try commitStage(staging, to: target)
+        try commitStage(name, at: parent, to: target.lastPathComponent)
     }
 
     private static func atomicCopy(
@@ -1314,26 +1643,18 @@ enum PatchTransaction {
         preservingExistingAttributes: Bool = false,
         fileManager: FileManager
     ) throws {
-        let staging = target.deletingLastPathComponent()
-            .appendingPathComponent(".3105-restore-\(UUID().uuidString)")
-        var descriptor = try createWritableStage(staging).descriptor
-        defer {
-            if descriptor >= 0 { close(descriptor) }
-            try? fileManager.removeItem(at: staging)
-        }
+        if targetFilesystem?.isRollingBack != true { try targetFilesystem?.validateBindings() }
+        let parent = try stageParent(target)
+        defer { close(parent) }
+        let name = ".3105-restore-\(UUID().uuidString)"
+        var descriptor = try createWritableStage(name, at: parent).descriptor
+        defer { if descriptor >= 0 { close(descriptor) }; unlinkat(parent, name, 0) }
         try fileOperation("restore-stage-copy") {
-            let sourceDescriptor = open(source.path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW)
-            guard sourceDescriptor >= 0 else { throw posixFailure() }
+            let sourceDescriptor = try openRead(source)
             defer { close(sourceDescriptor) }
 #if canImport(Darwin)
-            // Match FileManager.copyItem's metadata intent: retain source
-            // stat/ACL/xattrs and bytes while keeping the writable stage FD.
-            guard fcopyfile(sourceDescriptor, descriptor, nil, copyfile_flags_t(COPYFILE_ALL)) == 0 else {
-                throw posixFailure()
-            }
+            guard fcopyfile(sourceDescriptor, descriptor, nil, copyfile_flags_t(COPYFILE_ALL)) == 0 else { throw posixFailure() }
 #else
-            // Portable fixture path. Linux cannot validate Apple protection,
-            // ACL or xattr behavior; the iOS build always uses fcopyfile above.
             var buffer = [UInt8](repeating: 0, count: 1_024 * 1_024)
             while true {
                 let count = read(sourceDescriptor, &buffer, buffer.count)
@@ -1342,51 +1663,28 @@ enum PatchTransaction {
                 if count == 0 { break }
                 try writeAll(Data(buffer.prefix(count)), to: descriptor)
             }
-            let copied = try fileManager.attributesOfItem(atPath: source.path)
-            var metadata: [FileAttributeKey: Any] = [:]
-            for key in [FileAttributeKey.posixPermissions, .creationDate, .modificationDate] {
-                if let value = copied[key] { metadata[key] = value }
-            }
-            try fileManager.setAttributes(metadata, ofItemAtPath: staging.path)
+            try copyMetadata(from: sourceDescriptor, to: descriptor)
 #endif
         }
-        if preservingExistingAttributes,
-           let current = try? fileManager.attributesOfItem(atPath: target.path) {
-            var attributes: [FileAttributeKey: Any] = [:]
-            if let permissions = current[.posixPermissions] {
-                attributes[.posixPermissions] = permissions
-            }
-            if let protection = current[.protectionKey] {
-                attributes[.protectionKey] = protection
-            }
-            if !attributes.isEmpty {
-                try fileOperation("restore-stage-attributes") { try fileManager.setAttributes(attributes, ofItemAtPath: staging.path) }
-            }
+        if preservingExistingAttributes, try targetExists(target, fileManager: fileManager) {
+            let sourceDescriptor = try openRead(target)
+            defer { close(sourceDescriptor) }
+            try fileOperation("restore-stage-attributes") { try copyMetadata(from: sourceDescriptor, to: descriptor) }
         }
         try synchronizeAndClose(&descriptor)
-        try commitStage(staging, to: target)
+        try commitStage(name, at: parent, to: target.lastPathComponent)
     }
 
-    private static func createWritableStage(_ staging: URL) throws -> (descriptor: Int32, defaultPermissions: mode_t) {
+    private static func createWritableStage(_ name: String, at parent: Int32) throws -> (descriptor: Int32, defaultPermissions: mode_t) {
         try fileOperation("staging-create") {
-            // Capture the kernel's normal creation mode without reading or
-            // changing the process-global umask. The empty stage is made private
-            // before any payload, then finalized to the intended target mode.
-            let descriptor = open(staging.path, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW, mode_t(0o666))
+            let descriptor = openat(parent, name, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW, mode_t(0o666))
             guard descriptor >= 0 else { throw posixFailure() }
             do {
                 var metadata = stat()
-                try fileOperation("staging-stat") {
-                    guard fstat(descriptor, &metadata) == 0 else { throw posixFailure() }
-                }
-                try fileOperation("staging-private-mode") {
-                    guard fchmod(descriptor, mode_t(0o600)) == 0 else { throw posixFailure() }
-                }
+                guard fstat(descriptor, &metadata) == 0, fchmod(descriptor, mode_t(0o600)) == 0 else { throw posixFailure() }
                 return (descriptor, mode_t(metadata.st_mode & 0o7777))
             } catch {
-                close(descriptor)
-                unlink(staging.path)
-                throw error
+                close(descriptor); unlinkat(parent, name, 0); throw error
             }
         }
     }
@@ -1418,9 +1716,14 @@ enum PatchTransaction {
         }
     }
 
-    private static func commitStage(_ staging: URL, to target: URL) throws {
+    private static func commitStage(_ name: String, at parent: Int32, to target: String) throws {
         try fileOperation("target-rename") {
-            guard rename(staging.path, target.path) == 0 else { throw posixFailure() }
+            guard renameat(parent, name, parent, target) == 0 else { throw posixFailure() }
+            // Persist the directory entry, not only the staged file bytes.
+            while fsync(parent) != 0 {
+                if errno == EINTR { continue }
+                throw posixFailure()
+            }
         }
     }
 
@@ -1450,10 +1753,31 @@ enum PatchTransaction {
         }
     }
 
+    private static func synchronizeFile(_ url: URL) throws {
+        let descriptor = open(url.path, O_WRONLY | O_CLOEXEC | O_NOFOLLOW)
+        guard descriptor >= 0 else { throw posixFailure() }
+        defer { close(descriptor) }
+        while fsync(descriptor) != 0 {
+            if errno == EINTR { continue }
+            throw posixFailure()
+        }
+        try synchronizeDirectory(url.deletingLastPathComponent())
+    }
+
+    private static func saveEngineRecord(_ record: PatchEngineApplicationRecord, in store: PatchEngineApplicationStore) throws {
+        try store.save(record)
+        let directory = store.backupRoot.appendingPathComponent(".engine-applications", isDirectory: true)
+        try synchronizeFile(directory.appendingPathComponent(record.projectID.uuidString + ".plist"))
+        try synchronizeDirectory(store.backupRoot)
+    }
+
     private static func writeJournal(_ journal: Journal, to url: URL) throws {
         let encoder = PropertyListEncoder()
         encoder.outputFormat = .binary
-        try fileOperation("journal-write") { try encoder.encode(journal).write(to: url, options: .atomic) }
+        try fileOperation("journal-write") {
+            try encoder.encode(journal).write(to: url, options: .atomic)
+            try synchronizeFile(url)
+        }
     }
 
     private static func readJournal(_ url: URL) throws -> Journal {
@@ -1465,13 +1789,43 @@ enum PatchTransaction {
     }
 
     private static func digestFile(_ url: URL) throws -> Data {
-        let handle = try FileHandle(forReadingFrom: url)
-        defer { try? handle.close() }
+        let descriptor = try openRead(url)
+        defer { close(descriptor) }
         var hasher = SHA256()
-        while let chunk = try handle.read(upToCount: 1_024 * 1_024), !chunk.isEmpty {
-            hasher.update(data: chunk)
+        var buffer = [UInt8](repeating: 0, count: 1_024 * 1_024)
+        while true {
+            let count = read(descriptor, &buffer, buffer.count)
+            if count < 0 && errno == EINTR { continue }
+            guard count >= 0 else { throw posixFailure() }
+            if count == 0 { break }
+            hasher.update(data: Data(buffer.prefix(count)))
         }
         return Data(hasher.finalize())
+    }
+
+    private static func fileStateDigest(_ url: URL, fileManager: FileManager) throws -> Data {
+        let exists = try targetExists(url, fileManager: fileManager)
+        return exists ? Data([1]) + (try digestFile(url)) : Data([0])
+    }
+
+    private static func currentStateSnapshot(receipt: PatchTransactionReceipt, resolved: [ResolvedRecord], fileManager: FileManager) throws -> Data {
+        var payload = Data()
+        func part(_ data: Data) {
+            var count = UInt64(data.count).bigEndian
+            withUnsafeBytes(of: &count) { payload.append(contentsOf: $0) }
+            payload.append(data)
+        }
+        part(Data("restore-confirmation-v1".utf8))
+        part(Data(receipt.projectID.uuidString.utf8)); part(Data(receipt.id.uuidString.utf8))
+        for item in resolved.sorted(by: { $0.record.bundleID + "/" + $0.record.relativePath < $1.record.bundleID + "/" + $1.record.relativePath }) {
+            part(Data(item.record.bundleID.utf8)); part(Data(item.record.relativePath.utf8))
+            part(item.record.containerFingerprint)
+            let exists = try targetExists(item.target, fileManager: fileManager)
+            part(Data([exists ? 1 : 0]))
+            if exists { part(try digestFile(item.target)) }
+        }
+        try targetFilesystem?.validateBindings()
+        return digest(payload)
     }
 
     private static func containerFingerprint(_ url: URL) -> Data {
@@ -1541,9 +1895,9 @@ enum DevicePatchService {
         }
     }
 
-    static func inspectRestore(receipt: PatchTransactionReceipt) throws -> PatchRestoreInspection {
+    static func inspectRestore(receipt: PatchTransactionReceipt, preparedContainers: [String: URL]? = nil) throws -> PatchRestoreInspection {
         let bundleIDs = try PatchTransaction.requiredBundleIdentifiers(for: receipt)
-        return try withResolvedContainers(bundleIDs: bundleIDs) { roots in
+        return try withResolvedContainers(bundleIDs: bundleIDs, prepared: preparedContainers) { roots in
             try PatchTransaction.inspectRestore(
                 receipt: receipt,
                 containerResolver: { bundleID in
@@ -1559,6 +1913,7 @@ enum DevicePatchService {
     static func restore(
         receipt: PatchTransactionReceipt,
         allowChangedTargets: Bool = false,
+        expectedCurrentState: Data? = nil,
         preparedContainers: [String: URL]? = nil
     ) throws {
         let bundleIDs = try PatchTransaction.requiredBundleIdentifiers(for: receipt)
@@ -1566,6 +1921,7 @@ enum DevicePatchService {
             try PatchTransaction.restore(
                 receipt: receipt,
                 allowChangedTargets: allowChangedTargets,
+                expectedCurrentState: expectedCurrentState,
                 containerResolver: { bundleID in
                     guard let root = roots[bundleID] else {
                         throw PatchPackageError.targetAppUnavailable(bundleID)
@@ -1629,6 +1985,11 @@ enum DevicePatchService {
                 // Throw the actual daemon/token error and hold the grant through
                 // backup, writes, verification, rollback and restore.
                 handles.append(try WorseQueryHelper.acquireAccess(for: path))
+                let identity = ContainerStore.readWorseQueryIdentity(path)
+                guard identity.readable, identity.identifier == bundleID else {
+                    IOS27ContainerSession.invalidate(bundleIDs: [bundleID])
+                    throw PatchPackageError.targetAppUnavailable(bundleID)
+                }
             } else {
                 guard ExploitSupportPolicy.currentAccessProvider == .legacy3105 else {
                     throw WorseQueryError.appGroupUnavailable

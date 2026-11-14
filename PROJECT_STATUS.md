@@ -1,3 +1,7 @@
+## Build 2.4 (39): Bảo toàn patch và khôi phục
+
+Build 39 bổ sung lịch sử fail-closed, giữ association/backup active, confirmation restore gắn với snapshot dữ liệu, intent theo auth revision và danh sách recovery local độc lập catalog. Ghi target dùng directory descriptor đã giữ; probe direct hoàn tất trước auto-run native. Bảng OS và thứ tự 3105 → worse_query → AirLift không đổi. Xem [thiết kế, phạm vi và giới hạn kiểm chứng](docs/PATCH_RESTORE_FIX_39.md).
+
 ## Source update 13/11/2026: cô lập engine và provenance
 
 Đã sửa source để 3105/worse_query/AirLift dùng cùng policy, giới hạn entry point của từng engine, preparation theo Bundle ID và lưu engine/journal của giao dịch. Partial AirLift giữ trạng thái cần xử lý; legacy không rõ baseline giữ backup và không báo khôi phục gốc. Chưa phát hành IPA mới; version vẫn 2.4 (37). Xem [phạm vi và kiểm chứng](docs/ENGINE_ISOLATION_20261113.md).
