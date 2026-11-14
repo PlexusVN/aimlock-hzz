@@ -1,0 +1,226 @@
+name: Build Aimlock Hzz Unsigned IPA
+
+on:
+  push:
+    branches: [ "main", "master", "build/**" ]
+  pull_request:
+    branches: [ "main", "master" ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-15
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_16.4.app/Contents/Developer
+      CARGO_BUILD_JOBS: 3
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Xcode version
+        run: |
+          xcodebuild -version
+
+      - name: Verify production public configuration
+        run: |
+          python3 ReleaseTools/check_production.py
+          python3 Tests/test_license_verification_wiring.py
+          python3 Tests/test_security_flow_wiring.py
+          python3 Tests/test_ios16_compatibility.py
+          python3 Tests/test_worse_query_wiring.py
+          python3 Tests/test_worse_query_integration.py
+          python3 -m unittest discover -s Tests -p 'test_*.py'
+
+      - name: Verify TLS pin allowlist has no trust-only fallback
+        run: |
+          swiftc ThreeOneOSFive/helpers/AppSecurityConfiguration.swift \
+            Tests/CertificatePinSelfCheck.swift -o "$RUNNER_TEMP/astra-pins-selfcheck"
+          "$RUNNER_TEMP/astra-pins-selfcheck"
+
+      - name: Verify strict 3105, worse_query and AirLift OS/build routing
+        run: |
+          python3 Tests/extract_support_policy.py ThreeOneOSFive/helpers/KernelExploit.swift "$RUNNER_TEMP/SupportPolicy.swift"
+          swiftc "$RUNNER_TEMP/SupportPolicy.swift" Tests/IOSCompatibilitySelfCheck.swift Tests/Upstream3105SupportPolicy.swift -o "$RUNNER_TEMP/astra-os-routes-selfcheck"
+          "$RUNNER_TEMP/astra-os-routes-selfcheck"
+
+      - name: Verify protected lease renewal under latency and clock skew
+        run: |
+          swiftc ThreeOneOSFive/helpers/ProtectedReleaseLease.swift \
+            Tests/ProtectedLeaseSelfCheck.swift -o "$RUNNER_TEMP/astra-lease-selfcheck"
+          "$RUNNER_TEMP/astra-lease-selfcheck"
+
+      - name: Verify protected download CryptoKit interoperability
+        run: |
+          swiftc ThreeOneOSFive/helpers/AppSecurityConfiguration.swift \
+            ThreeOneOSFive/helpers/AntiTamper.swift \
+            ThreeOneOSFive/helpers/DeviceEnvironmentInspector.swift \
+            ThreeOneOSFive/helpers/SecureAPIClient.swift \
+            ThreeOneOSFive/helpers/NetworkAccessGate.swift \
+            ThreeOneOSFive/helpers/ServerSignatureVerifier.swift \
+            ThreeOneOSFive/helpers/ProtectedArtifactDecoder.swift \
+            Tests/ProtectedArtifactSelfCheck.swift -o "$RUNNER_TEMP/astra-security-selfcheck"
+          "$RUNNER_TEMP/astra-security-selfcheck" Tests/Fixtures/artifact_crypto_v1.json
+
+      - name: Verify literal license transport and error handling
+        run: |
+          swiftc ThreeOneOSFive/helpers/LicenseVerification.swift \
+            Tests/LicenseVerificationSelfCheck.swift -o "$RUNNER_TEMP/astra-license-selfcheck"
+          "$RUNNER_TEMP/astra-license-selfcheck"
+
+      - name: Verify license-scoped device identity and migration
+        run: |
+          swiftc ThreeOneOSFive/helpers/AppSecurityConfiguration.swift \
+            ThreeOneOSFive/helpers/DeviceIdentityService.swift \
+            Tests/DeviceIdentitySelfCheck.swift -o "$RUNNER_TEMP/astra-identity-selfcheck"
+          "$RUNNER_TEMP/astra-identity-selfcheck"
+
+      - name: Verify device recovery storage interruption safety
+        run: |
+          swiftc ThreeOneOSFive/helpers/AppSecurityConfiguration.swift \
+            ThreeOneOSFive/helpers/DeviceIdentityService.swift \
+            Tests/DeviceRecoverySelfCheck.swift -o "$RUNNER_TEMP/astra-recovery-storage-selfcheck"
+          "$RUNNER_TEMP/astra-recovery-storage-selfcheck"
+
+      - name: Verify recovery authorization contract
+        run: |
+          python3 Tests/extract_recovery_contract.py \
+            ThreeOneOSFive/helpers "$RUNNER_TEMP/RecoveryContract.swift"
+          swiftc "$RUNNER_TEMP/RecoveryContract.swift" \
+            Tests/ProtectedRecoverySelfCheck.swift -o "$RUNNER_TEMP/astra-recovery-contract-selfcheck"
+          "$RUNNER_TEMP/astra-recovery-contract-selfcheck"
+
+      - name: Verify actual recovery flow with isolated transport
+        run: |
+          python3 Tests/extract_recovery_flow.py \
+            ThreeOneOSFive/helpers "$RUNNER_TEMP/RecoveryFlow.swift"
+          swiftc ThreeOneOSFive/helpers/AppSecurityConfiguration.swift \
+            ThreeOneOSFive/helpers/DeviceIdentityService.swift \
+            "$RUNNER_TEMP/RecoveryFlow.swift" \
+            Tests/ProtectedRecoveryFlowSelfCheck.swift -o "$RUNNER_TEMP/astra-recovery-flow-selfcheck"
+          "$RUNNER_TEMP/astra-recovery-flow-selfcheck"
+
+      - name: Verify pinned-TLS enrollment and bounded session retries
+        run: |
+          python3 Tests/extract_identity_resume.py \
+            ThreeOneOSFive/helpers "$RUNNER_TEMP/IdentityResume.swift"
+          swiftc ThreeOneOSFive/helpers/AppSecurityConfiguration.swift \
+            ThreeOneOSFive/helpers/DeviceIdentityService.swift \
+            "$RUNNER_TEMP/IdentityResume.swift" \
+            Tests/ProtectedIdentityResumeSelfCheck.swift -o "$RUNNER_TEMP/astra-identity-resume-selfcheck"
+          "$RUNNER_TEMP/astra-identity-resume-selfcheck"
+
+      - name: Verify actual catalog decoding and apply restore transactions
+        run: |
+          swiftc ThreeOneOSFive/helpers/AppSecurityConfiguration.swift \
+            ThreeOneOSFive/helpers/ServerSignatureVerifier.swift \
+            ThreeOneOSFive/helpers/ProtectedArtifactDecoder.swift \
+            ThreeOneOSFive/helpers/PatchProjectModels.swift \
+            ThreeOneOSFive/helpers/PatchPackageCodec.swift \
+            ThreeOneOSFive/helpers/DirectPatchExecutor.swift \
+            ThreeOneOSFive/helpers/PatchTransaction.swift \
+            Tests/CatalogApplicationSelfCheck.swift -o "$RUNNER_TEMP/astra-catalog-selfcheck"
+          "$RUNNER_TEMP/astra-catalog-selfcheck" Tests/Fixtures/catalog
+
+      - name: Verify network-only policy and legacy integrity regressions
+        run: |
+          swiftc ThreeOneOSFive/helpers/AppSecurityConfiguration.swift \
+            ThreeOneOSFive/helpers/ServerSignatureVerifier.swift \
+            ThreeOneOSFive/helpers/ProtectedArtifactDecoder.swift \
+            ThreeOneOSFive/helpers/AntiTamper.swift \
+            ThreeOneOSFive/helpers/DeviceEnvironmentInspector.swift \
+            Tests/DeviceEnvironmentSelfCheck.swift \
+            Tests/IntegritySelfCheck.swift -o "$RUNNER_TEMP/astra-integrity-selfcheck"
+          "$RUNNER_TEMP/astra-integrity-selfcheck" Tests/Fixtures/integrity_release.json
+
+      - name: Cache iOS 16 native compilation
+        uses: actions/cache@v4
+        with:
+          path: build/airlift-ios16-target
+          key: ${{ runner.os }}-${{ runner.arch }}-airlift-ios16-xcode164-${{ hashFiles('patches/airlift-source.lock.json', 'patches/airlift-rsd-timeout-fallback.patch', 'ReleaseTools/build_airlift_compat.sh') }}
+
+      - name: Rebuild pinned AirliftFFI for iOS 16 and preserve iOS 27 engine
+        timeout-minutes: 35
+        run: bash ReleaseTools/build_airlift_compat.sh
+
+      - name: Verify AirLift pairing completion regression
+        run: python3 Tests/check_airlift_pairing_finish.py
+
+      - name: Build App (Unsigned)
+        run: |
+          mkdir -p build
+          xcodebuild build \
+            -project ThreeOneOSFive.xcodeproj \
+            -target 3105 \
+            -configuration Release \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            CONFIGURATION_BUILD_DIR="$(pwd)/build"
+
+      - name: Post-Build Verification
+        run: |
+          APP_NAME=$(find build -maxdepth 1 -name "*.app" -type d | head -n 1)
+          test -n "$APP_NAME"
+          test -d "$APP_NAME"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleDisplayName' "$APP_NAME/Info.plist")" = "Aimlock Hzz"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$APP_NAME/Info.plist")" = "2.4"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$APP_NAME/Info.plist")" = "37"
+          python3 - "$APP_NAME" <<'PY'
+          from pathlib import Path
+          import hashlib, sys
+          app = Path(sys.argv[1])
+          source = Path("ThreeOneOSFive/Resources/Backgrounds")
+          for name in ("login-backgroud.mp4", "app-backgroud.mp4",
+                       "login-backgroud-poster.png", "app-backgroud-poster.png"):
+              original, bundled = source / name, app / "Backgrounds" / name
+              assert original.is_file() and bundled.is_file(), f"Missing video background resource: {name}"
+              assert hashlib.sha256(original.read_bytes()).digest() == hashlib.sha256(bundled.read_bytes()).digest(), f"Changed video background bytes: {name}"
+          print("[build] Original video and poster bytes verified inside app bundle")
+          PY
+          EXECUTABLE=$(/usr/libexec/PlistBuddy -c "Print :CFBundleExecutable" "$APP_NAME/Info.plist")
+          test -x "$APP_NAME/$EXECUTABLE"
+          python3 ReleaseTools/verify_native_compatibility.py --app "$APP_NAME" --max-ios 16.0
+          nm -gj "$APP_NAME/$EXECUTABLE" | grep -Fx "_ALGetGrappaToken"
+          # Release uses hidden C visibility. These bridges are internal app
+          # symbols, so include local symbols rather than requiring exports.
+          nm -j "$APP_NAME/$EXECUTABLE" | grep -Fx "_AstraUses3105ContainerAccess"
+          nm -j "$APP_NAME/$EXECUTABLE" | grep -Fx "_worse_query"
+          nm -j "$APP_NAME/$EXECUTABLE" | grep -Fx "_worse_query_release"
+          nm -j "$APP_NAME/$EXECUTABLE" | grep -Fx "_worse_query_group_path"
+          nm -j "$APP_NAME/$EXECUTABLE" | grep -Fx "_AstraSignedApplicationGroups"
+          strings "$APP_NAME/$EXECUTABLE" | grep -F "RemoteXPC timed out after 6s"
+          strings "$APP_NAME/$EXECUTABLE" | grep -F "timeout fallback trying raw RPPairing"
+          strings "$APP_NAME/$EXECUTABLE" | grep -F "AirTraffic write timed out after 180s; operation cancelled"
+          ! strings "$APP_NAME/$EXECUTABLE" | grep -F "proceeding with direct writeDirectory"
+          echo "[build] Found App Bundle: $APP_NAME with Grappa helper linked"
+          python3 ReleaseTools/macho_release.py "$APP_NAME/$EXECUTABLE" > "$RUNNER_TEMP/release-before.json"
+          cp -R "$APP_NAME" "$RUNNER_TEMP/resign-check.app"
+          codesign --force --sign - "$RUNNER_TEMP/resign-check.app"
+          python3 ReleaseTools/macho_release.py "$RUNNER_TEMP/resign-check.app/$EXECUTABLE" > "$RUNNER_TEMP/release-after.json"
+          cmp "$RUNNER_TEMP/release-before.json" "$RUNNER_TEMP/release-after.json"
+
+      - name: Preserve App Group entitlements for external signing
+        run: |
+          APP_NAME=$(find build -maxdepth 1 -name "*.app" -type d | head -n 1)
+          # No Apple identity is used. ESign must replace this ad-hoc signature
+          # with a profile which actually authorizes an accessible App Group.
+          codesign --force --sign - --generate-entitlement-der \
+            --entitlements ThreeOneOSFive/ThreeOneOSFive.entitlements "$APP_NAME"
+          codesign -d --entitlements :- "$APP_NAME" > "$RUNNER_TEMP/astra-entitlements.plist"
+          python3 -c 'import plistlib,sys; p=plistlib.load(open(sys.argv[1],"rb")); assert "group.com.novax.app" in p.get("com.apple.security.application-groups",[])' "$RUNNER_TEMP/astra-entitlements.plist"
+
+      - name: Package IPA
+        run: |
+          mkdir -p build/Payload
+          APP_NAME=$(find build -maxdepth 1 -name "*.app" -type d | head -n 1)
+          cp -R "$APP_NAME" build/Payload/
+
+          cd build
+          zip -r Aimlock-Hzz.ipa Payload
+
+      - name: Upload IPA Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Aimlock-Hzz-Unsigned-IPA-2.4-37
+          path: build/Aimlock-Hzz.ipa

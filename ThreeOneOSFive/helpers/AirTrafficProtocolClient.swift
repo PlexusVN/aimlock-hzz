@@ -1,0 +1,856 @@
+//
+//  AirTrafficProtocolClient.swift
+//  ThreeOneOSFive
+//
+//  Authenticated RSD/Lockdown + AFC/AirTraffic transport backed by AirliftFFI.
+//
+
+import Foundation
+import Combine
+import AirliftFFI
+import Darwin
+
+enum AirLiftError: Error, LocalizedError {
+    case tunnelNotConnected
+    case pairingRequired
+    case pairingRevoked
+    case invalidTargetPath
+    case socketConnectionFailed(String)
+    case airTrafficHandshakeFailed(String)
+    case filePayloadCreationFailed
+    case verificationFailed(String)
+    case remoteReadUnsupported
+    case executionFailed(String)
+
+    var errorDescription: String? {
+        switch self {
+        case .tunnelNotConnected:
+            return "Đường hầm LocalDevVPN chưa kết nối."
+        case .pairingRequired:
+            if ExploitSupportPolicy.currentPairingMode == .onDeviceOrImportedFile {
+                return "Chưa ghép đôi thiết bị với Astra. Hãy vào Cài đặt (bánh răng) › AIRLIFT › bấm 'Pair trên máy' trước khi kích hoạt cheat."
+            }
+            return "Chưa có pairing hợp lệ. Hãy tạo file pairing bằng máy tính, sau đó vào Cài đặt (bánh răng) › AIRLIFT › Nhập file pairing."
+        case .pairingRevoked:
+            if ExploitSupportPolicy.currentPairingMode == .onDeviceOrImportedFile {
+                return "Thiết bị iPhone đã hủy ghép đôi với Astra. Vui lòng vào Cài đặt › AIRLIFT › bấm 'Pair trên máy' để ghép đôi lại."
+            }
+            return "File pairing đã hết hiệu lực. Hãy tạo lại file pairing bằng máy tính rồi nhập file mới vào Astra."
+        case .invalidTargetPath:
+            return "Đường dẫn đích không hợp lệ hoặc không phải đường dẫn tuyệt đối."
+        case .socketConnectionFailed(let message):
+            return "Không thể kết nối dịch vụ thiết bị: \(message)"
+        case .airTrafficHandshakeFailed(let message):
+            return "Bắt tay AirTraffic thất bại: \(message)"
+        case .filePayloadCreationFailed:
+            return "Không thể tạo payload AirTraffic."
+        case .verificationFailed(let message):
+            return "Không thể xác minh quyền ghi AirTraffic: \(message)"
+        case .remoteReadUnsupported:
+            return "AirliftFFI hiện không cung cấp API đọc file tùy ý; Astra chỉ xác minh canary và kết quả phiên ghi."
+        case .executionFailed(let message):
+            return "AirLift thất bại: \(message)"
+        }
+    }
+
+    /// Only these failures prove that the stored trust relationship itself is
+    /// gone. VPN, timeout, path, server and AirTraffic errors must never erase
+    /// a valid pairing or force the user through setup again.
+    var requiresRePairing: Bool {
+        switch self {
+        case .pairingRequired, .pairingRevoked:
+            return true
+        case .tunnelNotConnected, .invalidTargetPath, .socketConnectionFailed,
+             .airTrafficHandshakeFailed, .filePayloadCreationFailed,
+             .verificationFailed, .remoteReadUnsupported, .executionFailed:
+            return false
+        }
+    }
+}
+
+@MainActor
+final class AirTrafficProtocolClient: ObservableObject {
+    static let shared = AirTrafficProtocolClient()
+
+    enum VerificationLevel: String {
+        case none = "Chưa xác minh"
+        case canary = "Canary read-back + phiên ghi thành công"
+        case exactBytes = "Đã đọc lại đúng từng byte"
+    }
+
+    enum EngineHealthState: Equatable, Sendable {
+        case idle
+        case checking
+        case healthy(String)
+        case error(String)
+
+        var isHealthy: Bool {
+            if case .healthy = self { return true }
+            return false
+        }
+
+        var message: String {
+            switch self {
+            case .idle: return "Chưa kiểm tra"
+            case .checking: return "Đang kiểm tra kết nối dịch vụ..."
+            case .healthy(let msg): return msg
+            case .error(let msg): return msg
+            }
+        }
+    }
+
+    @Published private(set) var verificationLevel: VerificationLevel = .none
+    @Published private(set) var engineHealthState: EngineHealthState = .idle
+    @Published private(set) var lastHealthCheckDate: Date? = nil
+    @Published fileprivate(set) var lastLogLine = ""
+    @Published private(set) var isBusy = false
+
+    private let primaryHost = "10.7.0.1"
+    private var containerCache: [String: String] = [:]
+    private let ffiExecutionQueue = DispatchQueue(
+        label: "click.zynox.astra.airlift.ffi",
+        qos: .userInitiated
+    )
+    private let ffiWorkState = FFIWorkState()
+
+    private init() {
+        guard ExploitSupportPolicy.currentStorageMode == .airLift else { return }
+        cleanupOrphanedStagingDirectories()
+    }
+
+    private static let stagingPrefix = "novax-airlift-batch-"
+
+    /// The FFI currently consumes a directory path, so plaintext staging is
+    /// necessary. Keep it protected while locked, excluded from backups, and
+    /// owned by a narrowly named temporary directory with a random UUID.
+    private func makeProtectedStagingDirectory() throws -> URL {
+        var stage = FileManager.default.temporaryDirectory.appendingPathComponent(
+            Self.stagingPrefix + UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: stage, withIntermediateDirectories: false,
+            attributes: [.protectionKey: FileProtectionType.completeUntilFirstUserAuthentication])
+        do {
+            var values = URLResourceValues()
+            values.isExcludedFromBackup = true
+            try stage.setResourceValues(values)
+            return stage
+        } catch {
+            try? FileManager.default.removeItem(at: stage)
+            throw error
+        }
+    }
+
+    private func cleanupOrphanedStagingDirectories() {
+        let manager = FileManager.default
+        let root = manager.temporaryDirectory.standardizedFileURL.resolvingSymlinksInPath()
+        guard let entries = try? manager.contentsOfDirectory(at: root,
+            includingPropertiesForKeys: [.isDirectoryKey, .isSymbolicLinkKey]) else { return }
+        for entry in entries where entry.lastPathComponent.hasPrefix(Self.stagingPrefix) {
+            let suffix = String(entry.lastPathComponent.dropFirst(Self.stagingPrefix.count))
+            guard let id = UUID(uuidString: suffix),
+                  id.uuidString.caseInsensitiveCompare(suffix) == .orderedSame,
+                  entry.deletingLastPathComponent().standardizedFileURL.path == root.path,
+                  let values = try? entry.resourceValues(forKeys: [.isDirectoryKey, .isSymbolicLinkKey]),
+                  values.isDirectory == true, values.isSymbolicLink != true,
+                  entry.resolvingSymlinksInPath().deletingLastPathComponent().path == root.path else { continue }
+            // Only this transport's immediate UUID directories are eligible.
+            try? manager.removeItem(at: entry)
+        }
+    }
+
+    func resetSession() {
+        guard ExploitSupportPolicy.currentStorageMode == .airLift else { return }
+        ffiWorkState.invalidate()
+        // Keep all access to AirliftFFI's process-global route state on the
+        // same serial queue as device operations. This also makes reset safe
+        // if the user toggles AirLift while an FFI call is winding down.
+        ffiExecutionQueue.async {
+            al_clear_target_hosts()
+        }
+        clearCaches()
+        verificationLevel = .none
+        engineHealthState = .idle
+        lastLogLine = "AirTraffic session đã được làm mới."
+        log("airlift: session and caches reset")
+    }
+
+    func clearCaches() {
+        containerCache.removeAll()
+    }
+
+    /// Invalidate diagnostic callbacks without completing or interrupting an
+    /// in-flight native write. Its staging data stays owned until C returns.
+    func cancelPendingChecks() {
+        ffiWorkState.invalidate()
+        engineHealthState = .idle
+    }
+
+    @discardableResult
+    func checkRealAirLiftHealth() async -> (isHealthy: Bool, message: String) {
+        guard ExploitSupportPolicy.currentAccessProvider == .airLift else {
+            return (false, "Phiên bản iOS này không được chọn dùng AirLift.")
+        }
+        guard !isBusy else {
+            return (engineHealthState.isHealthy, "Đang có phiên ghi file, bỏ qua kiểm tra.")
+        }
+        let generation = ffiWorkState.generation
+        guard StorageEngineCoordinator.shared.isAirTrafficEngineLinked else {
+            let msg = "AirliftFFI chưa được liên kết trong bản build."
+            engineHealthState = .error(msg)
+            return (false, msg)
+        }
+        guard AirLiftTunnelManager.shared.isOperational else {
+            let msg = "LocalDevVPN chưa kết nối (10.7.0.1)."
+            engineHealthState = .error(msg)
+            return (false, msg)
+        }
+        guard (try? activePairingPath()) != nil else {
+            let msg = "Chưa có file ghép đôi hoặc thiết bị đã hủy ghép đôi."
+            engineHealthState = .error(msg)
+            return (false, msg)
+        }
+
+        engineHealthState = .checking
+        let (isValid, isRevoked, msg) = await verifyPairingWithDevice()
+        guard !Task.isCancelled, ffiWorkState.isCurrent(generation),
+              ExploitSupportPolicy.currentAccessProvider == .airLift else {
+            return (false, "Phiên kiểm tra AirLift đã thay đổi.")
+        }
+        if isValid {
+            do {
+                _ = try await resolveAppContainer(bundleID: "com.apple.iBooks")
+                guard !Task.isCancelled, ffiWorkState.isCurrent(generation) else {
+                    return (false, "Phiên kiểm tra AirLift đã thay đổi.")
+                }
+                let successMsg = "Pairing + RemoteXPC/RSD + Apple Books phản hồi tốt; canary sẽ được xác minh khi ghi."
+                AirLiftPairingManager.shared.status = .verified
+                lastHealthCheckDate = Date()
+                engineHealthState = .healthy(successMsg)
+                return (true, successMsg)
+            } catch {
+                guard !Task.isCancelled, ffiWorkState.isCurrent(generation) else {
+                    return (false, "Phiên kiểm tra AirLift đã thay đổi.")
+                }
+                log("airlift: Apple Books/AirTraffic container check notice: \(error.localizedDescription)")
+                lastHealthCheckDate = Date()
+                let detail = "Ghép đôi đã xác thực; chưa xác nhận truy cập container qua AirTraffic: \(error.localizedDescription)"
+                engineHealthState = .error(detail)
+                return (false, detail)
+            }
+        } else {
+            let failMsg = isRevoked ? "Thiết bị iPhone đã hủy ghép đôi trong Cài đặt." : msg
+            engineHealthState = .error(failMsg)
+            return (false, failMsg)
+        }
+    }
+
+    func writeFile(data: Data, targetPath: String) async throws {
+        try requireSelectedProvider()
+        _ = try await NetworkAccessGate.shared.requireAllowed()
+        try Task.checkCancellation()
+        guard !isBusy else {
+            throw AirLiftError.executionFailed("Một thao tác AirLift khác đang chạy. Vui lòng chờ hoàn tất.")
+        }
+        let target = try normalizedAbsolutePath(targetPath)
+        let targetURL = URL(fileURLWithPath: target)
+        let directory = targetURL.deletingLastPathComponent().path
+        let filename = targetURL.lastPathComponent
+        guard !filename.isEmpty else { throw AirLiftError.invalidTargetPath }
+
+        isBusy = true
+        defer { isBusy = false }
+
+        try await verifyTransportAndPairing()
+        _ = try await NetworkAccessGate.shared.requireAllowed()
+        try Task.checkCancellation()
+        let pairingPath = try activePairingPath()
+        verificationLevel = .none
+        // Never write after a failed canary. Re-run it for every transaction,
+        // because a cached success becomes stale after a VPN/RSD reconnect.
+        try await verifyCanary(pairingPath: pairingPath, targetDirectory: directory)
+        _ = try await NetworkAccessGate.shared.requireAllowed()
+        try await Task.sleep(nanoseconds: 200_000_000)
+
+        let stage = try makeProtectedStagingDirectory()
+        defer { try? FileManager.default.removeItem(at: stage) }
+        do {
+            try data.write(
+                to: stage.appendingPathComponent(filename),
+                options: [.atomic, .completeFileProtection]
+            )
+        } catch {
+            throw AirLiftError.filePayloadCreationFailed
+        }
+
+        do {
+            let networkGeneration = try await NetworkAccessGate.shared.requireAllowed()
+            try Task.checkCancellation()
+            try await writeDirectory(
+                pairingPath: pairingPath,
+                sourceDirectory: stage.path,
+                targetDirectory: directory,
+                networkGeneration: networkGeneration
+            )
+        } catch {
+            verificationLevel = .none
+            clearCaches()
+            throw error
+        }
+
+        // When a local sandbox grant happens to expose the target, perform the
+        // strongest possible verification. Otherwise the FFI canary read-back
+        // plus a successful authenticated AirTraffic transaction is required.
+        if FileManager.default.isReadableFile(atPath: target),
+           let recovered = try? Data(contentsOf: targetURL),
+           recovered == data {
+            verificationLevel = .exactBytes
+        } else {
+            verificationLevel = .canary
+        }
+    }
+
+    func writeFiles(_ files: [String: Data], targetDirectory: String) async throws {
+        try requireSelectedProvider()
+        _ = try await NetworkAccessGate.shared.requireAllowed()
+        try Task.checkCancellation()
+        guard !isBusy else {
+            throw AirLiftError.executionFailed("Một thao tác AirLift khác đang chạy. Vui lòng chờ hoàn tất.")
+        }
+        guard !files.isEmpty else { throw AirLiftError.filePayloadCreationFailed }
+        let directory = try normalizedAbsolutePath(targetDirectory)
+
+        isBusy = true
+        defer { isBusy = false }
+
+        try await verifyTransportAndPairing()
+        _ = try await NetworkAccessGate.shared.requireAllowed()
+        try Task.checkCancellation()
+        let pairingPath = try activePairingPath()
+        verificationLevel = .none
+        try await verifyCanary(pairingPath: pairingPath, targetDirectory: directory)
+        _ = try await NetworkAccessGate.shared.requireAllowed()
+        try await Task.sleep(nanoseconds: 200_000_000)
+
+        let stage = try makeProtectedStagingDirectory()
+        defer { try? FileManager.default.removeItem(at: stage) }
+        do {
+            for (name, data) in files {
+                guard !name.isEmpty, name == (name as NSString).lastPathComponent,
+                      name != ".", name != ".." else {
+                    throw AirLiftError.invalidTargetPath
+                }
+                try data.write(
+                    to: stage.appendingPathComponent(name),
+                    options: [.atomic, .completeFileProtection]
+                )
+            }
+        } catch let error as AirLiftError {
+            throw error
+        } catch {
+            throw AirLiftError.filePayloadCreationFailed
+        }
+
+        do {
+            let networkGeneration = try await NetworkAccessGate.shared.requireAllowed()
+            try Task.checkCancellation()
+            try await writeDirectory(
+                pairingPath: pairingPath,
+                sourceDirectory: stage.path,
+                targetDirectory: directory,
+                networkGeneration: networkGeneration
+            )
+        } catch {
+            verificationLevel = .none
+            clearCaches()
+            throw error
+        }
+        verificationLevel = .canary
+    }
+
+    func readFile(at targetPath: String) async throws -> Data {
+        try requireSelectedProvider()
+        let target = try normalizedAbsolutePath(targetPath)
+        if FileManager.default.isReadableFile(atPath: target) {
+            return try Data(contentsOf: URL(fileURLWithPath: target))
+        }
+        throw AirLiftError.remoteReadUnsupported
+    }
+
+    static func isPairingRevokedError(_ error: String) -> Bool {
+        let err = error.lowercased()
+        // Các lỗi mạng/socket tạm thời KHÔNG được coi là bị thu hồi ghép đôi
+        if err.contains("timed out") || err.contains("timeout") ||
+           err.contains("connection refused") || err.contains("connection reset") ||
+           err.contains("broken pipe") || err.contains("network unreachable") ||
+           err.contains("no route") || err.contains("socket closed") ||
+           err.contains("os error 54") || err.contains("os error 60") ||
+           err.contains("os error 61") || err.contains("os error 57") {
+            return false
+        }
+        return err.contains("tunnelfailurepairverify") ||
+               err.contains("rejected pairing keys") ||
+               err.contains("pairing revoked") ||
+               err.contains("device rejected") ||
+               err.contains("re-pair in settings") ||
+               err.contains("invalidpairing") ||
+               err.contains("devicenotpaired") ||
+               (err.contains("not trusted") && !err.contains("network")) ||
+               err.contains("unpaired")
+    }
+
+    func verifyPairingWithDevice() async -> (isValid: Bool, isRevoked: Bool, message: String) {
+        guard ExploitSupportPolicy.currentAccessProvider == .airLift else {
+            return (false, false, "Thiết bị này không dùng AirLift.")
+        }
+        guard !isBusy else {
+            return (false, false, "Đang có phiên AirLift khác, bỏ qua kiểm tra.")
+        }
+        let generation = ffiWorkState.generation
+        guard let pairingPath = try? activePairingPath() else {
+            return (false, false, "Chưa có file pairing hợp lệ. Vui lòng hoàn thành Bước 2.")
+        }
+        guard AirLiftTunnelManager.shared.isOperational else {
+            return (false, false, "LocalDevVPN chưa kết nối. Vui lòng bật LocalDevVPN ở Bước 1.")
+        }
+
+        // Fast non-blocking pre-flight socket check (1.0s timeout) to prevent 120s FFI freeze
+        let activePeer = AirLiftTunnelManager.shared.activePeerAddress
+        let probeHosts = [activePeer, "10.7.0.1", "172.16.0.1"].filter { !$0.isEmpty }
+        var hasResponsiveSocket = false
+        for host in probeHosts {
+            let rsd = AirLiftTunnelManager.probeTcpPort(host: host, port: 49152, timeoutSec: 1.0)
+            let lkd = AirLiftTunnelManager.probeTcpPort(host: host, port: 62078, timeoutSec: 1.0)
+            if rsd.reachable || lkd.reachable {
+                hasResponsiveSocket = true
+                break
+            }
+        }
+
+        if !hasResponsiveSocket && !AirLiftTunnelManager.shared.isTunnelRouteDetected {
+            return (false, false, "Không thể kết nối đến dịch vụ thiết bị qua LocalDevVPN. Hãy mở ứng dụng LocalDevVPN, tắt rồi bật lại kết nối, sau đó thử lại.")
+        }
+
+        isBusy = true
+        defer { isBusy = false }
+
+        for attempt in 1...2 {
+            do {
+                let result: FFIStringResult = try await runBlocking(name: "Astra.AirLift.ProbePairing", timeout: 20) {
+                    var output: UnsafeMutablePointer<CChar>?
+                    var error: UnsafeMutablePointer<CChar>?
+                    let code = pairingPath.withCString { pairing in
+                        "com.apple.mobilesafari".withCString { bundle in
+                            al_find_app_container(pairing, bundle, novaAirLiftLogCallback, nil, &output, &error)
+                        }
+                    }
+                    let value = Self.consumeString(&output)
+                    let message = Self.consumeString(&error)
+                    return FFIStringResult(code: code, value: value, error: message)
+                }
+
+                guard !Task.isCancelled, ffiWorkState.isCurrent(generation),
+                      ExploitSupportPolicy.currentAccessProvider == .airLift else {
+                    return (false, false, "Phiên kiểm tra AirLift đã thay đổi.")
+                }
+
+                if result.code == 0 || result.error.contains("not found in InstallationProxy response") {
+                    return (true, false, "Ghép đôi hoạt động tốt.")
+                }
+
+                if Self.isPairingRevokedError(result.error) {
+                    AirLiftPairingManager.shared.handlePairingRevoked(reason: result.error)
+                    return (false, true, "Thiết bị iPhone đã hủy ghép đôi trong Cài đặt. Vui lòng ghép đôi lại.")
+                }
+
+                if attempt == 1 && (result.error.contains("timed out") || result.error.contains("timeout") || result.error.contains("refused")) {
+                    try? await Task.sleep(nanoseconds: 800_000_000)
+                    continue
+                }
+
+                let friendlyMsg = Self.humanFriendlyErrorMessage(result.error)
+                return (false, false, friendlyMsg)
+            } catch {
+                guard !Task.isCancelled, ffiWorkState.isCurrent(generation) else {
+                    return (false, false, "Phiên kiểm tra AirLift đã thay đổi.")
+                }
+                if attempt == 1 {
+                    try? await Task.sleep(nanoseconds: 800_000_000)
+                    continue
+                }
+                return (false, false, Self.humanFriendlyErrorMessage(error.localizedDescription))
+            }
+        }
+
+        return (false, false, "Không thể kết nối dịch vụ thiết bị qua LocalDevVPN. Hãy mở lại LocalDevVPN và bấm kết nối.")
+    }
+
+    private static func humanFriendlyErrorMessage(_ raw: String) -> String {
+        let err = raw.lowercased()
+        if err.contains("172.16.0.1:49152") || err.contains("raw rppairing timed out") ||
+           err.contains("remotexpc timed out") || err.contains("ensure a loopback vpn") ||
+           err.contains("device connection failed") {
+            return "Không thể kết nối dịch vụ qua LocalDevVPN (10.7.0.1:49152). Vui lòng mở LocalDevVPN, tắt rồi bật lại kết nối, sau đó thử lại."
+        }
+        if err.contains("rejected pairing keys") || err.contains("tunnelfailurepairverify") ||
+           err.contains("pairing revoked") || err.contains("invalidpairing") {
+            return "Thiết bị iPhone đã từ chối hoặc hủy ghép đôi với Astra trong Cài đặt. Vui lòng ghép đôi lại."
+        }
+        if err.contains("quá thời gian") || err.contains("timed out") {
+            return "Quá thời gian kết nối dịch vụ. Hãy kiểm tra LocalDevVPN đã bật rồi bấm kiểm tra lại."
+        }
+        return raw.isEmpty ? "Không phản hồi từ thiết bị." : raw
+    }
+
+    func resolveAppContainer(bundleID: String) async throws -> String {
+        try requireSelectedProvider()
+        let generation = ffiWorkState.generation
+        guard !isBusy else {
+            throw AirLiftError.executionFailed("Một thao tác AirLift khác đang chạy. Vui lòng chờ hoàn tất.")
+        }
+        guard !bundleID.isEmpty else { throw AirLiftError.invalidTargetPath }
+        if let cached = containerCache[bundleID], !cached.isEmpty {
+            return cached
+        }
+
+        isBusy = true
+        defer { isBusy = false }
+
+        try await verifyTransportAndPairing()
+        let pairingPath = try activePairingPath()
+
+        let result: FFIStringResult = try await runBlocking(name: "Astra.AirLift.FindContainer", timeout: 135) {
+            var output: UnsafeMutablePointer<CChar>?
+            var error: UnsafeMutablePointer<CChar>?
+            let code = pairingPath.withCString { pairing in
+                bundleID.withCString { bundle in
+                    al_find_app_container(pairing, bundle, novaAirLiftLogCallback, nil, &output, &error)
+                }
+            }
+            let value = Self.consumeString(&output)
+            let message = Self.consumeString(&error)
+            return FFIStringResult(code: code, value: value, error: message)
+        }
+        guard ffiWorkState.isCurrent(generation) else {
+            throw AirLiftError.executionFailed("Phiên AirLift đã thay đổi. Hãy kiểm tra lại kết nối.")
+        }
+        guard result.code == 0, !result.value.isEmpty else {
+            if Self.isPairingRevokedError(result.error) {
+                AirLiftPairingManager.shared.handlePairingRevoked(reason: result.error)
+                throw AirLiftError.pairingRevoked
+            }
+            throw AirLiftError.executionFailed(
+                result.error.isEmpty ? "Không tìm thấy container của \(bundleID)." : result.error
+            )
+        }
+        containerCache[bundleID] = result.value
+        return result.value
+    }
+
+    private func verifyTransportAndPairing() async throws {
+        try requireSelectedProvider()
+        let tunnel = AirLiftTunnelManager.shared
+        await tunnel.verifyLoopbackService()
+        // QueryType is a useful UI diagnostic, but it must not be the sole gate:
+        // AirliftFFI performs the authoritative authenticated RSD/Lockdown probe
+        // and can use transport routes that the lightweight 62078 check cannot.
+        guard tunnel.isOperational else {
+            throw AirLiftError.socketConnectionFailed(
+                tunnel.lastErrorMessage ?? "Hãy mở ứng dụng LocalDevVPN, bật tunnel rồi thử lại."
+            )
+        }
+        _ = try activePairingPath()
+    }
+
+    private func requireSelectedProvider() throws {
+        guard ExploitSupportPolicy.currentAccessProvider == .airLift else {
+            throw AirLiftError.executionFailed("Thiết bị này không dùng AirLift.")
+        }
+    }
+
+    private func activePairingPath() throws -> String {
+        let pairing = AirLiftPairingManager.shared
+        if pairing.status == .revoked {
+            throw AirLiftError.pairingRevoked
+        }
+        guard pairing.status.isPaired,
+              let path = pairing.pairingFilePath,
+              FileManager.default.fileExists(atPath: path) else {
+            throw AirLiftError.pairingRequired
+        }
+        return path
+    }
+
+    private nonisolated static func configureTargetHosts(_ candidates: [String]) throws {
+        // Drop a route cached by a previous VPN/session, then provide both the
+        // LocalDevVPN peer and real Wi-Fi/cellular interface addresses needed
+        // by RemoteXPC's multihost handshake.
+        guard let primaryHost = candidates.first else {
+            throw AirLiftError.socketConnectionFailed("Không có route RemoteXPC để cấu hình.")
+        }
+        al_clear_target_hosts()
+        let primaryCode = primaryHost.withCString { al_set_target_host($0) }
+        guard primaryCode == 0 else {
+            throw AirLiftError.socketConnectionFailed("Không thể đặt host LocalDevVPN \(primaryHost).")
+        }
+
+        let allocated = candidates.map { strdup($0) }
+        defer { allocated.forEach { free($0) } }
+        let pointers = allocated.map { UnsafePointer($0) }
+        let candidatesCode: Int32 = pointers.withUnsafeBufferPointer { buffer in
+            guard let base = buffer.baseAddress else { return -1 }
+            return al_set_target_hosts(base, buffer.count)
+        }
+        guard candidatesCode == 0 else {
+            al_clear_target_hosts()
+            throw AirLiftError.socketConnectionFailed("Không thể cấu hình route RemoteXPC.")
+        }
+    }
+
+    private func verifyCanary(pairingPath: String, targetDirectory: String) async throws {
+        verificationLevel = .none
+        let result: FFIStringResult = try await runBlocking(name: "Astra.AirLift.Canary", timeout: 195) {
+            var json: UnsafeMutablePointer<CChar>?
+            var error: UnsafeMutablePointer<CChar>?
+            let code = pairingPath.withCString { pairing in
+                targetDirectory.withCString { target in
+                    al_exploit_run(pairing, target, novaAirLiftLogCallback, nil, &json, &error)
+                }
+            }
+            return FFIStringResult(
+                code: code,
+                value: Self.consumeString(&json),
+                error: Self.consumeString(&error)
+            )
+        }
+        guard result.code == 0 else {
+            if Self.isPairingRevokedError(result.error) {
+                AirLiftPairingManager.shared.handlePairingRevoked(reason: result.error)
+                throw AirLiftError.pairingRevoked
+            }
+            throw AirLiftError.verificationFailed(result.error.isEmpty ? "canary bị từ chối" : result.error)
+        }
+        guard let data = result.value.data(using: .utf8),
+              let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              object["airTrafficSucceeded"] as? Bool == true,
+              object["exactBytesRecovered"] as? Bool == true else {
+            throw AirLiftError.verificationFailed("engine không xác nhận byte canary đọc lại.")
+        }
+        verificationLevel = .canary
+    }
+
+    private func writeDirectory(
+        pairingPath: String,
+        sourceDirectory: String,
+        targetDirectory: String,
+        networkGeneration: UInt64
+    ) async throws {
+        // This is the last suspension-free check before enqueueing native I/O.
+        // Once the C writer starts it has no cancellation API; block later
+        // operations rather than interrupting a file transaction mid-write.
+        try Task.checkCancellation()
+        try NetworkAccessGate.shared.validateGeneration(networkGeneration)
+        try await AppIntegrityRuntime.shared.requireAllowed(force:true)
+        try requireSelectedProvider()
+        try Task.checkCancellation()
+        try NetworkAccessGate.shared.validateGeneration(networkGeneration)
+        let result: FFIVoidResult = try await runBlocking(name: "Astra.AirLift.Write", timeout: 195) {
+            try IntegrityCommitBarrier.withCommit {
+            var error: UnsafeMutablePointer<CChar>?
+            let code = pairingPath.withCString { pairing in
+                sourceDirectory.withCString { source in
+                    targetDirectory.withCString { target in
+                        al_exploit_write_dir(
+                            pairing, source, target,
+                            novaAirLiftLogCallback, nil, &error
+                        )
+                    }
+                }
+            }
+            return FFIVoidResult(code: code, error: Self.consumeString(&error))
+            }
+        }
+        guard result.code == 0 else {
+            if Self.isPairingRevokedError(result.error) {
+                AirLiftPairingManager.shared.handlePairingRevoked(reason: result.error)
+                throw AirLiftError.pairingRevoked
+            }
+            throw AirLiftError.executionFailed(
+                result.error.isEmpty ? "AirTraffic không xác nhận phiên ghi." : result.error
+            )
+        }
+    }
+
+    private func normalizedAbsolutePath(_ path: String) throws -> String {
+        let value = (path as NSString).standardizingPath
+        guard value.hasPrefix("/"), value != "/", !value.contains("\0") else {
+            throw AirLiftError.invalidTargetPath
+        }
+        return value
+    }
+
+    private func runBlocking<T: Sendable>(
+        name: String,
+        timeout: TimeInterval = 30,
+        _ work: @escaping @Sendable () throws -> T
+    ) async throws -> T {
+        try requireSelectedProvider()
+        try Task.checkCancellation()
+        let generation = ffiWorkState.generation
+        let activePeer = AirLiftTunnelManager.shared.activePeerAddress
+        var candidates: [String] = []
+        if !activePeer.isEmpty { candidates.append(activePeer) }
+        if !candidates.contains(primaryHost) { candidates.append(primaryHost) }
+        if !candidates.contains("172.16.0.1") { candidates.append("172.16.0.1") }
+        for candidate in AirLiftTunnelManager.remoteXPCHostCandidates()
+            where !candidates.contains(candidate) {
+            candidates.append(candidate)
+        }
+        log("airlift: queued \(name) with target hosts: \(candidates.joined(separator: ", "))")
+        let targetHosts = candidates
+
+        guard ffiWorkState.tryBegin() else {
+            throw AirLiftError.executionFailed(
+                "Phiên AirLift trước vẫn đang đóng kết nối. Vui lòng chờ rồi thử lại."
+            )
+        }
+        let invocation = FFINativeInvocation()
+        return try await withTaskCancellationHandler(operation: {
+            try await withCheckedThrowingContinuation { continuation in
+                let gate = FFIContinuationGate(continuation)
+                ffiExecutionQueue.async {
+                    let result: Result<T, Error>
+                    do {
+                        guard ExploitSupportPolicy.currentAccessProvider == .airLift,
+                              self.ffiWorkState.isCurrent(generation) else {
+                            throw AirLiftError.executionFailed("Phiên AirLift đã thay đổi. Hãy kiểm tra lại kết nối.")
+                        }
+                        // Cancellation and native dispatch share one atomic
+                        // boundary. Once dispatch wins, await its real result;
+                        // cancellation cannot release the payload or operation slot.
+                        try invocation.beginNative()
+                        try Self.configureTargetHosts(targetHosts)
+                        result = .success(try work())
+                    } catch {
+                        result = .failure(error)
+                    }
+                    self.ffiWorkState.end()
+                    gate.resume(with: result)
+                }
+                DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + timeout) {
+                    // Native I/O owns the staging files and exclusive operation
+                    // slot until it actually returns. A Swift deadline must never
+                    // unwind the caller, delete its payload, or start another write.
+                    gate.reportDeadline {
+                        log("airlift: \(name) exceeded \(Int(timeout))s; waiting for native completion")
+                    }
+                }
+            }
+        }, onCancel: { invocation.cancelIfQueued() })
+    }
+
+    private nonisolated static func consumeString(_ pointer: inout UnsafeMutablePointer<CChar>?) -> String {
+        guard let value = pointer else { return "" }
+        let string = String(cString: value)
+        al_string_free(value)
+        pointer = nil
+        return string
+    }
+}
+
+private struct FFIStringResult: Sendable {
+    let code: Int32
+    let value: String
+    let error: String
+}
+
+private struct FFIVoidResult: Sendable {
+    let code: Int32
+    let error: String
+}
+
+private final class FFIContinuationGate<T: Sendable>: @unchecked Sendable {
+    private let lock = NSLock()
+    private var continuation: CheckedContinuation<T, Error>?
+
+    init(_ continuation: CheckedContinuation<T, Error>) {
+        self.continuation = continuation
+    }
+
+    func resume(with result: Result<T, Error>) {
+        lock.lock()
+        guard let continuation else {
+            lock.unlock()
+            return
+        }
+        self.continuation = nil
+        lock.unlock()
+        continuation.resume(with: result)
+    }
+
+    func reportDeadline(_ report: () -> Void) {
+        lock.lock()
+        let pending = continuation != nil
+        lock.unlock()
+        if pending { report() }
+    }
+}
+
+private final class FFIWorkState: @unchecked Sendable {
+    private let lock = NSLock()
+    private var occupied = false
+    private var revision: UInt64 = 0
+
+    var generation: UInt64 {
+        lock.lock(); defer { lock.unlock() }
+        return revision
+    }
+
+    func isCurrent(_ generation: UInt64) -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        return revision == generation
+    }
+
+    func invalidate() {
+        lock.lock(); revision &+= 1; lock.unlock()
+    }
+
+    func tryBegin() -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        guard !occupied else { return false }
+        occupied = true
+        return true
+    }
+
+    func end() {
+        lock.lock()
+        occupied = false
+        lock.unlock()
+    }
+}
+
+private final class FFINativeInvocation: @unchecked Sendable {
+    private enum State { case queued, started, cancelled }
+    private let lock = NSLock()
+    private var state: State = .queued
+
+    func beginNative() throws {
+        lock.lock(); defer { lock.unlock() }
+        guard state == .queued else { throw CancellationError() }
+        state = .started
+    }
+
+    func cancelIfQueued() {
+        lock.lock(); defer { lock.unlock() }
+        if state == .queued { state = .cancelled }
+    }
+}
+
+private let novaAirLiftLogCallback: ALLogCallback = { _, message in
+    guard let message else { return }
+    let line = String(cString: message)
+    log("airlift: \(line)")
+    Task { @MainActor in
+        guard ExploitSupportPolicy.currentAccessProvider == .airLift else { return }
+        AirTrafficProtocolClient.shared.lastLogLine = line
+    }
+}
