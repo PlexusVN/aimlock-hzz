@@ -37,7 +37,6 @@ struct FeaturesView: View {
                 ScrollView {
                     VStack(spacing: 16) {
                         categoryPanel
-                        recoveryPanel
                         patchPanel
                     }
                     .padding(.horizontal, 16)
@@ -390,89 +389,6 @@ struct FeaturesView: View {
             return service.patches.filter { $0.categoryId == catID }
         }
         return service.patches
-    }
-
-    // Recovery stays outside catalog/category filters. Server removal or a
-    // failed refresh must not remove the route to a local active transaction.
-    @ViewBuilder
-    private var recoveryPanel: some View {
-        if !service.recoveryItems.isEmpty || service.recoveryInventoryError != nil {
-            VStack(alignment: .leading, spacing: 12) {
-                HStack(spacing: 8) {
-                    Image(systemName: "arrow.counterclockwise")
-                    Text("Khôi phục dữ liệu")
-                        .font(.system(size: 15, weight: .bold))
-                    Spacer()
-                    Text("\(service.recoveryItems.count)")
-                        .font(.system(size: 11, weight: .semibold, design: .monospaced))
-                }
-                .foregroundStyle(AppTheme.gamingText)
-
-                Text("Các lần áp dụng còn được lưu trên thiết bị, kể cả khi chức năng không còn trong danh mục.")
-                    .font(.system(size: 11))
-                    .foregroundStyle(AppTheme.gamingTextSecondary)
-                    .fixedSize(horizontal: false, vertical: true)
-
-                ForEach(service.recoveryItems) { item in
-                    recoveryRow(item)
-                }
-
-                if let error = service.recoveryInventoryError {
-                    Text(error)
-                        .font(.system(size: 11))
-                        .foregroundStyle(AppTheme.statusWarning)
-                        .fixedSize(horizontal: false, vertical: true)
-                    Button("Đọc lại dữ liệu khôi phục") { service.refreshRecoveryItems() }
-                        .font(.system(size: 12, weight: .semibold))
-                        .foregroundStyle(AppTheme.gamingText)
-                        .disabled(actionsBlocked)
-                }
-            }
-            .padding(14)
-            .background(AppTheme.gamingSurface, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
-            .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous)
-                .stroke(AppTheme.gamingBorder, lineWidth: 1))
-        }
-    }
-
-    private func recoveryRow(_ item: PatchRecoveryItem) -> some View {
-        HStack(spacing: 10) {
-            Image(systemName: item.state == .recoveryRequired || !item.requestedEnabled ? "exclamationmark.triangle" : "arrow.counterclockwise")
-                .font(.system(size: 16, weight: .semibold))
-                .foregroundStyle(item.state == .recoveryRequired || !item.requestedEnabled ? AppTheme.statusWarning : AppTheme.gamingText)
-                .frame(width: 26)
-            VStack(alignment: .leading, spacing: 4) {
-                Text(userFacingFeatureText(item.title, fallback: "Dữ liệu đã áp dụng"))
-                    .font(.system(size: 13, weight: .semibold))
-                    .foregroundStyle(AppTheme.gamingText)
-                    .fixedSize(horizontal: false, vertical: true)
-                Text(!item.requestedEnabled ? "Chưa khôi phục" : (item.state == .recoveryRequired ? "Cần kiểm tra trước khi khôi phục" : "Đang áp dụng"))
-                    .font(.system(size: 10))
-                    .foregroundStyle(item.state == .recoveryRequired || !item.requestedEnabled ? AppTheme.statusWarning : AppTheme.gamingTextSecondary)
-                Text("Mã \(item.projectID.uuidString.prefix(8))")
-                    .font(.system(size: 9, design: .monospaced))
-                    .foregroundStyle(AppTheme.gamingTextSecondary)
-            }
-            .frame(maxWidth: .infinity, alignment: .leading)
-            if workingActionID == "recovery:\(item.projectID.uuidString)" {
-                ProgressView().tint(AppTheme.gamingText)
-                    .frame(width: 80, height: 44)
-            } else {
-                Button("Khôi phục") { beginRestore(.recovery(item)) }
-                    .font(.system(size: 11, weight: .semibold))
-                    .foregroundStyle(AppTheme.gamingText)
-                    .frame(minWidth: 64, minHeight: 44)
-                    .padding(.horizontal, 8)
-                    .background(AppTheme.gamingSurfaceRaised, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
-                    .buttonStyle(GamingPressButtonStyle(scale: 0.985))
-                    .disabled(actionsBlocked)
-                    .opacity(actionsBlocked ? 0.5 : 1)
-                    .accessibilityLabel("Khôi phục \(item.title)")
-                    .accessibilityIdentifier("recovery-restore-\(item.projectID.uuidString)")
-            }
-        }
-        .padding(10)
-        .background(AppTheme.gamingBackgroundRaised, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
     }
 
     // All cards share one UI operation state. Changing category can replace a

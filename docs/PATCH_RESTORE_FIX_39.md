@@ -49,3 +49,7 @@ Kết quả cuối, commit GitHub, workflow và IPA được tổng hợp tại 
 ## Chuẩn bị tổng quát worse_query
 
 Bước vào app quét tổng quát cửa sổ inode ước lượng của vùng Application container, không lọc game, không cần game được cài hoặc đọc được bundle identifier. Chỉ cần App Group hợp lệ và ít nhất một container nhận quyền/đọc được. Session không tự gán UUID chưa xác minh thành game. Khi thao tác cần ghi, app mới tìm và kiểm đúng target, rồi xác minh identity lại dưới grant transaction. Không mở rộng native scope, không tuyên bố quét mọi file hệ thống của iPhone.
+
+## Điều chỉnh giao diện build 40
+
+Theo yêu cầu người dùng, gỡ khối “Khôi phục dữ liệu” khỏi tab Chức năng và preview. Không thay logic journal/backup, xác nhận restore hoặc hành vi tắt lỗi → báo lỗi + toggle OFF.

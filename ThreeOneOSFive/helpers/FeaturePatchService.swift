@@ -1901,7 +1901,7 @@ enum PatchRestoreError: LocalizedError {
         case .confirmationExpired:
             return "Dữ liệu hoặc phiên đăng nhập đã thay đổi từ lúc kiểm tra. Hãy kiểm tra lại bản khôi phục trước khi xác nhận."
         case .retryNeedsRecovery(let detail):
-            return "Chưa thể bật lại vì dữ liệu cũ cần khôi phục. Hãy mở Khôi phục dữ liệu để kiểm tra và xác nhận trước khi thử lại. \(detail)"
+            return "Chưa thể bật lại vì lần khôi phục trước chưa hoàn tất. \(detail)"
         }
     }
 }
