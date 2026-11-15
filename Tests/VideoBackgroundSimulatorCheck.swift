@@ -195,7 +195,8 @@ final class VideoDriver {
             output = replacement
         }
         var average: Double?
-        if let output, let pixels = output.copyPixelBuffer(forItemTime: item.currentTime(), itemTimeForDisplay: nil) {
+        var decodedFrameTime = CMTime.invalid
+        if let output, let pixels = output.copyPixelBuffer(forItemTime: item.currentTime(), itemTimeForDisplay: &decodedFrameTime) {
             CVPixelBufferLockBaseAddress(pixels, .readOnly)
             if let base = CVPixelBufferGetBaseAddress(pixels) {
                 let width = CVPixelBufferGetWidth(pixels), height = CVPixelBufferGetHeight(pixels)
@@ -214,8 +215,14 @@ final class VideoDriver {
             }
             CVPixelBufferUnlockBaseAddress(pixels, .readOnly)
         }
-        if resource == "login-backgroud", time >= 11.6 + 0.001 {
-            failures.append("Login entered encoded black tail at \(time)")
+        // The wall-clock item position may overshoot while the queue advances.
+        // Verify the decoded frame timestamp; allow one source frame for the
+        // independently sampled player clock during the queue handoff.
+        if resource == "login-backgroud", decodedFrameTime.isValid, decodedFrameTime.seconds >= 11.6 {
+            failures.append("Decoded login frame entered black tail at \(decodedFrameTime.seconds)")
+        }
+        if resource == "login-backgroud", time >= 11.6 + 1.0 / 25.0 {
+            failures.append("Login queue did not advance at \(time)")
         }
         if resource == "login-backgroud", let average, average < 2 {
             failures.append("Decoded login frame was black at \(time)")
