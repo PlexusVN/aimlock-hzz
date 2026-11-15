@@ -30,7 +30,10 @@ class DirectFilesystemRecovery(unittest.TestCase):
         with tempfile.TemporaryDirectory() as folder:
             folder = Path(folder)
             source = folder / 'ActualTransaction.swift'
-            source.write_text(production_sources(), encoding='utf-8')
+            # Target roots are owned temporary directories supplied explicitly
+            # by the fixture; device container discovery never runs here.
+            boundary = '\nenum ContainerStore { static func isApplicationContainerPath(_ path: String) -> Bool { false } }\n'
+            source.write_text(production_sources() + boundary, encoding='utf-8')
             binary = folder / 'reference-provenance-restore'
             subprocess.run(['swiftc', '-swift-version', '5', str(source),
                             str(ROOT / 'Tests/DirectTransactionProvenanceSelfCheck.swift'),
