@@ -400,6 +400,7 @@ struct FeaturesView: View {
             return
         }
         Haptics.medium()
+        let requestedRevision = authManager.authenticationRevision
         workingActionID = "patch:\(patch.downloadIdentity)"
         actionTask = Task { @MainActor in
             defer { workingActionID = nil; actionTask = nil }
@@ -407,6 +408,25 @@ struct FeaturesView: View {
                 try await service.applyPatch(patch, auth: authManager)
                 showSuccess(title: "Bật chức năng thành công", message: "Chức năng đang bật.")
             } catch {
+                if PatchRestoreError.requiresRestoreReview(error), !Task.isCancelled,
+                   authManager.authenticationRevision == requestedRevision {
+                    do {
+                        let confirmation = try await service.inspectPatchRestore(patch, auth: authManager)
+                        try Task.checkCancellation()
+                        guard authManager.authenticationRevision == requestedRevision else { return }
+                        if !confirmation.changedPaths.isEmpty {
+                            // Reuse the existing review sheet from this same
+                            // toggle. No separate recovery panel is required.
+                            pendingRestore = FeatureRestoreReview(target: .patch(patch),
+                                confirmation: confirmation, requestedRevision: requestedRevision,
+                                reenablePatch: patch)
+                            return
+                        }
+                    } catch {
+                        showFailure(error, title: "Không thể bật chức năng")
+                        return
+                    }
+                }
                 showFailure(error, title: "Không thể bật chức năng")
             }
         }
@@ -452,8 +472,14 @@ struct FeaturesView: View {
             do {
                 // The service binds this review to receipt, authentication and
                 // inspected bytes; a later change requires another inspection.
-                try await restore(review.target, confirmation: review.confirmation)
-                showRestoreSuccess()
+                if let patch = review.reenablePatch {
+                    try await service.applyPatch(patch, auth: authManager,
+                                                 recoveryConfirmation: review.confirmation)
+                    showSuccess(title: "Bật chức năng thành công", message: "Chức năng đang bật.")
+                } else {
+                    try await restore(review.target, confirmation: review.confirmation)
+                    showRestoreSuccess()
+                }
             } catch {
                 if !(error is CancellationError) { recordOffFailure(review.target, requestedRevision: review.requestedRevision) }
                 showFailure(error, title: "Chưa thể khôi phục")
@@ -523,6 +549,7 @@ private struct FeatureRestoreReview: Identifiable {
     let target: FeatureRestoreTarget
     let confirmation: PatchRestoreConfirmation
     let requestedRevision: UInt64
+    var reenablePatch: PatchItem? = nil
     var id: UUID { confirmation.id }
 }
 
@@ -570,7 +597,7 @@ private struct RestoreReviewSheet: View {
             .background(AppTheme.gamingBackgroundRaised, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
 
             Button(role: .destructive, action: onConfirm) {
-                Text("Khôi phục bản sao lưu")
+                Text(review.reenablePatch == nil ? "Khôi phục bản sao lưu" : "Khôi phục và bật lại")
                     .font(.system(size: 14, weight: .bold))
                     .frame(maxWidth: .infinity, minHeight: 48)
                     .foregroundStyle(AppTheme.gamingBackground)

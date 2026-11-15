@@ -41,6 +41,7 @@ enum DiscoveryFixture {
     static let max = "/private/var/mobile/Containers/Data/Application/BBBBBBBB-BBBB-BBBB-BBBB-BBBBBBBBBBBB"
     static let replacementGame = "/private/var/mobile/Containers/Data/Application/DDDDDDDD-DDDD-DDDD-DDDD-DDDDDDDDDDDD"
     static let other = "/private/var/mobile/Containers/Data/Application/AAAAAAAA-AAAA-AAAA-AAAA-AAAAAAAAAAAA"
+    static let own = "/private/var/mobile/Containers/Data/Application/EEEEEEEE-EEEE-EEEE-EEEE-EEEEEEEEEEEE"
     static let progress = ContainerScanProgress(historyURL: nil)
     static var ranges: [(UInt64, UInt64)] = []
     static var active: [Int64: String] = [:]
@@ -48,13 +49,13 @@ enum DiscoveryFixture {
     static var calls = 0, legacyCalls = 0
     static var reject = false, noMatch = false, setupError = false, missingGroup = false, cancel = false
     static var mcmPaths: [String:String] = [:], lsPaths: [String:String] = [:], lookupCalls: [String] = []
-    static var identityUnavailable = false
+    static var identityUnavailable = false, cancelOwnGrant = false
     static var ranOnMain = false
     static var preflightFailed = false, localLinkFailed = false, readDenied = false
     static var onlyFirst = false, duplicateFirst = false, noCandidates = false, replaceGame = false, identityReads = 0
     static func reset(clearCache: Bool = true) {
         ranges = []; active = [:]; next = 1; calls = 0; legacyCalls = 0
-        mcmPaths = [:]; lsPaths = [:]; lookupCalls = []; identityUnavailable = false
+        mcmPaths = [:]; lsPaths = [:]; lookupCalls = []; identityUnavailable = false; cancelOwnGrant = false
         reject = false; noMatch = false; setupError = false; missingGroup = false; cancel = false; ranOnMain = false
         preflightFailed = false; localLinkFailed = false; readDenied = false; onlyFirst = false; duplicateFirst = false; noCandidates = false; replaceGame = false; identityReads = 0
         if clearCache { UserDefaults.standard.removePersistentDomain(forName: UserDefaults.suite) }
@@ -97,6 +98,7 @@ enum WorseQueryHelper {
         if DiscoveryFixture.reject { throw WorseQueryError.queryRejected }
         let handle = DiscoveryFixture.next; DiscoveryFixture.next += 1
         DiscoveryFixture.active[handle] = path
+        if path == DiscoveryFixture.own && DiscoveryFixture.cancelOwnGrant { DiscoveryFixture.progress.requestCancellation() }
         return handle
     }
     static func releaseAccess(handle: Int64) { DiscoveryFixture.active.removeValue(forKey: handle) }
@@ -263,6 +265,50 @@ final class RestartFlag: @unchecked Sendable {
         precondition(preparation.state == .failed && DiscoveryFixture.calls == 0 && DiscoveryFixture.ranges.last!.1 == 2_100_000,
                      "no readable candidate is not proof of general access")
 
+        // An anonymous inode window can be empty even when scoped requests
+        // work. Prove general capability against the app's own known UUID;
+        // this neither needs a game nor publishes any target mapping.
+        DiscoveryFixture.reset(); DiscoveryFixture.noCandidates = true
+        let ownRootGate = IOS27ContainerPreparation(progress: DiscoveryFixture.progress,
+            operation: { try ContainerStore.prepareIOS27Access(bundleIDs: $0, forceScan: $1) },
+            generalOperation: { try ContainerStore.prepareWorseQueryFilesystemAccess(forceScan: $0,
+                ownContainerPath: DiscoveryFixture.own) })
+        ownRootGate.configureTargets(bundleIDs: [])
+        await ownRootGate.prepareIfNeeded(force: true); await drain()
+        precondition(ownRootGate.state == .ready && DiscoveryFixture.calls == 1 &&
+                     DiscoveryFixture.progress.snapshot.readable == 1 && DiscoveryFixture.active.isEmpty)
+        precondition(DiscoveryFixture.identityReads == 0 && DiscoveryFixture.lookupCalls.isEmpty)
+        ownRootGate.enterApplication()
+        precondition(ownRootGate.didContinue && IOS27ContainerSession.path(for: DiscoveryFixture.gameID) == nil)
+        DiscoveryFixture.mcmPaths[DiscoveryFixture.gameID] = DiscoveryFixture.game
+        let exactRangeCount = DiscoveryFixture.ranges.count
+        try await ownRootGate.prepareAdditionalTargets(bundleIDs: [DiscoveryFixture.gameID])
+        precondition(DiscoveryFixture.ranges.count == exactRangeCount &&
+                     IOS27ContainerSession.path(for: DiscoveryFixture.gameID) == DiscoveryFixture.game,
+                     "empty anonymous readiness blocked a fresh exact target lookup")
+
+        for deniedRead in [false, true] {
+            ownRootGate.reset(); DiscoveryFixture.reset(); DiscoveryFixture.noCandidates = true
+            DiscoveryFixture.reject = !deniedRead; DiscoveryFixture.readDenied = deniedRead
+            await ownRootGate.prepareIfNeeded(force: true); await drain()
+            precondition(ownRootGate.state == .failed && !ownRootGate.didContinue && DiscoveryFixture.active.isEmpty,
+                         "own container URL alone was mistaken for granted readable access")
+        }
+        ownRootGate.reset(); DiscoveryFixture.reset(); DiscoveryFixture.noCandidates = true
+        do {
+            _ = try await Task.detached {
+                try ContainerStore.prepareWorseQueryFilesystemAccess(forceScan: true, ownContainerPath: "/tmp/not-an-app-container")
+            }.value
+            preconditionFailure("an arbitrary own-root hint bypassed the UUID-container scope")
+        } catch WorseQueryError.preparationRequired {}
+        precondition(DiscoveryFixture.calls == 0 && DiscoveryFixture.active.isEmpty)
+
+        ownRootGate.reset(); DiscoveryFixture.reset(); DiscoveryFixture.noCandidates = true
+        DiscoveryFixture.cancelOwnGrant = true
+        await ownRootGate.prepareIfNeeded(force: true); await drain()
+        precondition(ownRootGate.state == .failed && !ownRootGate.didContinue && DiscoveryFixture.active.isEmpty,
+                     "cancellation during own-root proof published readiness or leaked its grant")
+
         preparation.reset(); DiscoveryFixture.reset(); DiscoveryFixture.readDenied = true
         await preparation.prepareIfNeeded(force: true); await drain()
         precondition(preparation.state == .failed && DiscoveryFixture.progress.snapshot.grants == 3)
@@ -281,6 +327,30 @@ final class RestartFlag: @unchecked Sendable {
         } catch WorseQueryError.containerDiscoveryFailed {}
         precondition(DiscoveryFixture.progress.shareText.contains("nhiều UUID"))
         preparation.configureTargets(bundleIDs: [DiscoveryFixture.gameID, DiscoveryFixture.maxID])
+
+        // A fresh exact system binding wins over an old anonymous UUID that
+        // still advertises the same ID. A remembered path has no such priority.
+        preparation.reset(); DiscoveryFixture.reset(); DiscoveryFixture.duplicateFirst = true
+        await preparation.prepareIfNeeded(force: true); await drain()
+        preparation.enterApplication()
+        UserDefaults.standard.set(DiscoveryFixture.other, forKey: "astra.resolved_container."+DiscoveryFixture.gameID)
+        DiscoveryFixture.mcmPaths[DiscoveryFixture.gameID] = DiscoveryFixture.game
+        let rangesBeforeExact = DiscoveryFixture.ranges.count
+        let grantsBeforeExact = DiscoveryFixture.calls
+        try await preparation.prepareAdditionalTargets(bundleIDs: [DiscoveryFixture.gameID])
+        precondition(IOS27ContainerSession.path(for: DiscoveryFixture.gameID) == DiscoveryFixture.game)
+        precondition(DiscoveryFixture.ranges.count == rangesBeforeExact && DiscoveryFixture.calls == grantsBeforeExact + 1,
+                     "an anonymous residual hint overrode a fresh exact system binding")
+        precondition(DiscoveryFixture.active.isEmpty)
+
+        // Partial multi-target discovery must preserve that authority too.
+        // The second target may still need hints, without letting an old UUID
+        // reintroduce a conflict for the first system-bound target.
+        IOS27ContainerSession.reset()
+        UserDefaults.standard.removePersistentDomain(forName: UserDefaults.suite)
+        let pair = try await targetScan([DiscoveryFixture.gameID, DiscoveryFixture.maxID])
+        precondition(pair[DiscoveryFixture.gameID] == DiscoveryFixture.game && pair[DiscoveryFixture.maxID] == DiscoveryFixture.max)
+        precondition(DiscoveryFixture.ranges.count == rangesBeforeExact && DiscoveryFixture.active.isEmpty)
 
         preparation.reset(); DiscoveryFixture.reset(); DiscoveryFixture.cancel = true
         await preparation.prepareIfNeeded(force: true); await drain()

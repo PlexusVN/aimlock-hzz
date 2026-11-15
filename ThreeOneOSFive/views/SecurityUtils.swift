@@ -357,10 +357,12 @@ var expectedServerPin: String { AppSecurityConfiguration.tlsLeafPin }
 enum StableDeviceHWID {
     private static let lock = NSLock()
     private static let tag = "deviceHwid"
+    private static let fallbackTag = "deviceHwidFallbackV1"
+    private static let fallbackPrefix = "ASTRA-HWID-v1-"
 
     private struct SavedHWID {
         let value: String
-        let uuid: UUID
+        let identity: String
     }
 
     private static func validated(_ data: Data) throws -> SavedHWID {
@@ -375,83 +377,136 @@ enum StableDeviceHWID {
             value.removeFirst()
             value = value.trimmingCharacters(in: .whitespacesAndNewlines)
         }
-        // Accept only the existing hyphenated UUID representation. Formatting
-        // repair never accepts a legacy hash, braces, URN, NUL or a new UUID.
-        guard value.utf8.count == 36, let uuid = UUID(uuidString: value) else {
-            throw DeviceIdentityError.invalidIdentity
+        if value.utf8.count == 36, let uuid = UUID(uuidString: value) {
+            return SavedHWID(value: value, identity: "uuid:" + uuid.uuidString)
         }
-        return SavedHWID(value: value, uuid: uuid)
+        throw DeviceIdentityError.invalidIdentity
     }
 
-    private static func persistFallbackMirror(_ candidate: String,
-                                              mirror: DeviceIdentityStorage) throws -> String {
-        try mirror.write(tag, Data(candidate.utf8))
-        guard let persisted = try mirror.read(tag) else { throw DeviceIdentityError.identityMissing }
-        let confirmed = try validated(persisted)
-        guard confirmed.uuid == UUID(uuidString: candidate) else {
+    private static func validatedFallback(_ data: Data) throws -> SavedHWID {
+        guard let value = String(data: data, encoding: .utf8),
+              value.utf8.count == fallbackPrefix.utf8.count + 36,
+              value.hasPrefix(fallbackPrefix),
+              let uuid = UUID(uuidString: String(value.dropFirst(fallbackPrefix.count))) else {
+            throw DeviceIdentityError.invalidIdentity
+        }
+        return SavedHWID(value: value, identity: "fallback:" + uuid.uuidString)
+    }
+
+    static func isUsable(_ value: String) -> Bool {
+        let data = Data(value.utf8)
+        return (try? validated(data).value) == value || (try? validatedFallback(data).value) == value
+    }
+
+    private struct SavedPair {
+        var primary: Data?, mirror: Data?
+        var primaryError: Error?, mirrorError: Error?
+    }
+
+    private static func readPair(_ primary: DeviceIdentityStorage?, _ mirror: DeviceIdentityStorage?, tag: String) -> SavedPair {
+        var pair = SavedPair()
+        if let primary {
+            do { pair.primary = try primary.read(tag) } catch { pair.primaryError = error }
+        }
+        if let mirror {
+            do { pair.mirror = try mirror.read(tag) } catch { pair.mirrorError = error }
+        }
+        return pair
+    }
+
+    private static func selected(_ pair: SavedPair, parse: (Data) throws -> SavedHWID) throws -> SavedHWID? {
+        let primary = pair.primary.flatMap { try? parse($0) }
+        let mirror = pair.mirror.flatMap { try? parse($0) }
+        if let primary, let mirror, primary.identity != mirror.identity {
             throw DeviceIdentityError.ambiguousIdentity
         }
-        return confirmed.value
+        return primary ?? mirror
+    }
+
+    /// Synchronize only missing or already-valid copies. Invalid bytes remain
+    /// untouched for diagnosis; a read failure never authorizes overwriting.
+    private static func synchronize(_ value: SavedHWID, pair: SavedPair,
+                                    primary: DeviceIdentityStorage?, mirror: DeviceIdentityStorage?,
+                                    tag: String, parse: (Data) throws -> SavedHWID) {
+        let bytes = Data(value.value.utf8)
+        if pair.primary == nil, pair.primaryError == nil { try? primary?.write(tag, bytes) }
+        if pair.mirrorError == nil,
+           pair.mirror == nil || pair.mirror.flatMap({ try? parse($0) }) != nil,
+           pair.mirror != bytes { try? mirror?.write(tag, bytes) }
+    }
+
+    private static func persistFallback(primary: DeviceIdentityStorage?, mirror: DeviceIdentityStorage?,
+                                        generate: () -> UUID) throws -> String {
+        let value = fallbackPrefix + generate().uuidString
+        let bytes = Data(value.utf8)
+        var firstError: Error?
+        // Re-read any persisted value before writing its mirror, including a
+        // failed-insert winner. The outer lock serializes this app process.
+        if let primary {
+            do { try primary.write(fallbackTag, bytes) } catch { firstError = error }
+            let pair = readPair(primary, mirror, tag: fallbackTag)
+            if let stored = try selected(pair, parse: validatedFallback) {
+                synchronize(stored, pair: pair, primary: primary, mirror: mirror,
+                            tag: fallbackTag, parse: validatedFallback)
+                return stored.value
+            }
+            if pair.primary != nil || pair.mirror != nil { throw DeviceIdentityError.invalidIdentity }
+            if let error = pair.primaryError { throw error }
+            if let error = pair.mirrorError { throw error }
+        }
+        if let mirror {
+            do { try mirror.write(fallbackTag, bytes) } catch { throw error }
+            let pair = readPair(primary, mirror, tag: fallbackTag)
+            if let stored = try selected(pair, parse: validatedFallback) { return stored.value }
+            if let error = pair.mirrorError { throw error }
+            if let error = pair.primaryError { throw error }
+            throw DeviceIdentityError.invalidIdentity
+        }
+        throw firstError ?? DeviceIdentityError.identityMissing
     }
 
     /// The mirror contains a public HWID only, never keys, license or credentials.
     /// A primary read error without a known saved ID must not create a new device.
     static func resolve(storage: DeviceIdentityStorage, vendorID: String?,
                         mirror: DeviceIdentityStorage? = nil,
-                        fallbackID: (() -> UUID)? = nil) throws -> String {
+                        fallbackStorage: DeviceIdentityStorage? = nil,
+                        fallbackMirror: DeviceIdentityStorage? = nil,
+                        generateFallback: () -> UUID = { UUID() }) throws -> String {
         lock.lock(); defer { lock.unlock() }
-        var saved: Data?, backup: Data?
-        var primaryReadError: Error?, mirrorReadError: Error?
-        do { saved = try storage.read(tag) } catch { primaryReadError = error }
-        if let mirror {
-            do { backup = try mirror.read(tag) } catch { mirrorReadError = error }
-        }
-
-        let primaryValue = saved.flatMap { try? validated($0) }
-        let mirrorValue = backup.flatMap { try? validated($0) }
-        if let primaryValue, let mirrorValue, primaryValue.uuid != mirrorValue.uuid {
-            // Two valid, different UUIDs are evidence of a real conflict. Do
-            // not choose by IDFV or overwrite either registered representation.
+        let regular = readPair(storage, mirror, tag: tag)
+        let fallback = readPair(fallbackStorage, fallbackMirror, tag: fallbackTag)
+        let regularValue = try selected(regular, parse: validated)
+        let fallbackValue = try selected(fallback, parse: validatedFallback)
+        if regularValue != nil && fallbackValue != nil {
+            // Returning a regular identity after publishing a fallback would
+            // silently switch the server-bound HWID. Preserve both instead.
             throw DeviceIdentityError.ambiguousIdentity
         }
-        if let primaryValue {
-            // Preserve the primary UUID's letter case, including a legacy
-            // BOM-decoded value. The v1 server may bind this exact string.
-            if let mirror {
-                // Refill a missing mirror or synchronize case-equivalent valid
-                // UUIDs. A corrupt/unreadable mirror remains untouched evidence.
-                if mirrorReadError == nil, backup == nil || mirrorValue != nil {
-                    let representation = Data(primaryValue.value.utf8)
-                    if backup != representation { try? mirror.write(tag, representation) }
-                }
-            }
-            return primaryValue.value
+        if let regularValue {
+            synchronize(regularValue, pair: regular, primary: storage, mirror: mirror, tag: tag, parse: validated)
+            return regularValue.value
         }
-        if let mirrorValue {
-            // A surviving durable UUID is sufficient to continue. Refill only
-            // a confirmed-missing primary; preserve corrupt/inaccessible bytes.
-            if primaryReadError == nil, saved == nil {
-                try? storage.write(tag, Data(mirrorValue.value.utf8))
-            }
-            return mirrorValue.value
+        if let fallbackValue {
+            synchronize(fallbackValue, pair: fallback, primary: fallbackStorage, mirror: fallbackMirror,
+                        tag: fallbackTag, parse: validatedFallback)
+            return fallbackValue.value
         }
-        if let primaryReadError { throw primaryReadError }
-        if let mirrorReadError { throw mirrorReadError }
-        guard saved == nil, backup == nil else { throw DeviceIdentityError.invalidIdentity }
-        let candidate: String
-        let usesFallback: Bool
-        if let vendorID, UUID(uuidString: vendorID) != nil {
-            candidate = vendorID
-            usesFallback = false
-        } else {
-            // Both stores were read successfully and are confirmed empty.
-            // Allocate one app identity only here; a later IDFV must never
-            // replace the saved value or consume another server device slot.
-            guard mirror != nil, let fallbackID else { throw DeviceIdentityError.identityMissing }
-            candidate = fallbackID().uuidString
-            usesFallback = true
+        // Unknown/inaccessible data must not be mistaken for a new install.
+        for error in [regular.primaryError, regular.mirrorError, fallback.primaryError, fallback.mirrorError] {
+            if let error { throw error }
         }
-        let data = Data(candidate.utf8)
+        let regularMissing = regular.primary == nil && regular.mirror == nil
+        let fallbackMissing = fallback.primary == nil && fallback.mirror == nil
+        guard fallbackMissing else { throw DeviceIdentityError.invalidIdentity }
+        if (!regularMissing || vendorID.flatMap(UUID.init(uuidString:)) == nil),
+           fallbackStorage != nil || fallbackMirror != nil {
+            return try persistFallback(primary: fallbackStorage, mirror: fallbackMirror, generate: generateFallback)
+        }
+        guard regularMissing else { throw DeviceIdentityError.invalidIdentity }
+        guard let vendorID, UUID(uuidString: vendorID) != nil else {
+            throw DeviceIdentityError.identityMissing
+        }
+        let data = Data(vendorID.utf8)
         do { try storage.write(tag, data) }
         catch {
             let writeError = error
@@ -463,25 +518,11 @@ enum StableDeviceHWID {
                 return value.value
             }
             guard let mirror else { throw writeError }
-            if usesFallback {
-                return try persistFallbackMirror(candidate, mirror: mirror)
-            }
             try mirror.write(tag, data) // Publish only after durable local storage succeeds.
-            return candidate
-        }
-        if usesFallback {
-            // Never send a freshly generated UUID based on a successful-looking
-            // write alone. Read back the durable primary before returning it.
-            guard let persisted = try storage.read(tag) else {
-                guard let mirror else { throw DeviceIdentityError.identityMissing }
-                return try persistFallbackMirror(candidate, mirror: mirror)
-            }
-            let confirmed = try validated(persisted)
-            try? mirror?.write(tag, Data(confirmed.value.utf8))
-            return confirmed.value
+            return vendorID
         }
         try? mirror?.write(tag, data)
-        return candidate
+        return vendorID
     }
 
     static func isRetryable(_ error: Error) -> Bool {
@@ -509,9 +550,9 @@ enum StableDeviceHWID {
                     ? "iOS chưa trả về định danh thiết bị. Aimlock Hzz sẽ tự đọc lại khi ứng dụng hoạt động; hãy thử lại sau giây lát (HW04)."
                     : "Định danh thiết bị chưa sẵn sàng. Hãy mở khóa iPhone rồi thử lại (HW01)."
             case .invalidIdentity:
-                return "Không còn bản lưu HWID có UUID hợp lệ để khôi phục. Aimlock Hzz giữ nguyên dữ liệu và không tạo HWID mới; hãy sao chép thông tin lỗi để được kiểm tra (HW05-DATA)."
+                return "Chưa đọc được định danh đã lưu hoặc HWID dự phòng bền vững. Aimlock Hzz giữ nguyên dữ liệu; hãy sao chép thông tin lỗi để được kiểm tra (HW05-DATA)."
             case .ambiguousIdentity:
-                return "Hai bản lưu HWID chứa hai UUID khác nhau. Aimlock Hzz giữ nguyên cả hai và không tự chọn thiết bị; hãy sao chép thông tin lỗi để được kiểm tra (HW05-CONFLICT)."
+                return "Các bản lưu chứa định danh HWID khác nhau. Aimlock Hzz giữ nguyên dữ liệu và không tự đổi thiết bị; hãy sao chép thông tin lỗi để được kiểm tra (HW05-CONFLICT)."
             case .invalidInput: break
             }
         }
@@ -525,7 +566,7 @@ struct DeviceUtils {
 
     /// Public identity backup in this application's private, protected storage.
     /// Private keys continue to use DeviceIdentityStorage.keychain exclusively.
-    private static func hwidMirrorURL(create: Bool) throws -> URL {
+    private static func hwidMirrorURL(create: Bool, fallback: Bool = false) throws -> URL {
         let base = try FileManager.default.url(for: .applicationSupportDirectory,
             in: .userDomainMask, appropriateFor: nil, create: create)
         let directory = base.appendingPathComponent("AstraDeviceIdentity", isDirectory: true)
@@ -536,7 +577,7 @@ struct DeviceUtils {
             var values = URLResourceValues(); values.isExcludedFromBackup = true
             try excluded.setResourceValues(values)
         }
-        return directory.appendingPathComponent("hwid-v1")
+        return directory.appendingPathComponent(fallback ? "hwid-fallback-v1" : "hwid-v1")
     }
 
     private static let hwidMirror = DeviceIdentityStorage(read: { _ in
@@ -549,10 +590,20 @@ struct DeviceUtils {
         // Identity is deliberately retained across logout and transient errors.
     })
 
+    private static let hwidFallbackMirror = DeviceIdentityStorage(read: { _ in
+        do { return try Data(contentsOf: hwidMirrorURL(create: false, fallback: true)) }
+        catch CocoaError.fileReadNoSuchFile { return nil }
+    }, write: { _, data in
+        let url = try hwidMirrorURL(create: true, fallback: true)
+        try data.write(to: url, options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication])
+    }, remove: { _ in
+        // The application HWID survives logout just like the original HWID.
+    })
+
     static func resolveHWID() throws -> String {
         try StableDeviceHWID.resolve(storage: .keychain,
             vendorID: UIDevice.current.identifierForVendor?.uuidString, mirror: hwidMirror,
-            fallbackID: { UUID() })
+            fallbackStorage: .keychain, fallbackMirror: hwidFallbackMirror)
     }
 
     static var deviceModel: String {

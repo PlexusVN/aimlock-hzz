@@ -288,6 +288,103 @@ import Foundation
         try check(airLift.isPatchEnabled(item),"old AirLift OFF leaked into a different operation")
         try check(FeaturePatchService().isPatchEnabled(item),"persisted AirLift OFF leaked into a different operation")
 
+        // A failed OFF must not strand a changed target behind an OFF toggle.
+        // Inspection is read-only; the existing review can authorize only its
+        // exact receipt/snapshot and the verified retry remains one operation.
+        try Fixture.reset()
+        let retryChanged=FeaturePatchService()
+        try await retryChanged.applyPatch(item,auth:auth)
+        let retryProject=Fixture.nextProject.id,retryReceipt=Fixture.receipts[Fixture.nextProject.id]!
+        Fixture.failRestore=true
+        try await mustFail("OFF failure was not reported") { try await retryChanged.restorePatch(item,auth:auth) }
+        Fixture.failRestore=false;Fixture.changed=true
+        do {
+            try await retryChanged.applyPatch(item,auth:auth)
+            throw CatalogCheckError.failed("unconfirmed changed target was silently replaced")
+        } catch {
+            try check(PatchRestoreError.requiresRestoreReview(error),"ON retry did not identify the existing review route")
+        }
+        let retryReview=try await retryChanged.inspectPatchRestore(item,auth:auth)
+        try check(!retryReview.changedPaths.isEmpty && !retryChanged.isPatchEnabled(item),"opening retry review changed OFF intent")
+        try check(Fixture.restores==0 && Fixture.receipts[retryProject]==retryReceipt,"inspection/cancel touched the original receipt")
+        let originalSnapshot=Fixture.snapshot
+        Fixture.snapshot=Data([9,8,7])
+        try await mustFail("stale retry snapshot reached restore/apply") {
+            try await retryChanged.applyPatch(item,auth:auth,recoveryConfirmation:retryReview)
+        }
+        try check(Fixture.restores==0 && Fixture.applies==1 && !retryChanged.isPatchEnabled(item),"stale retry mutated files or enabled toggle")
+        Fixture.snapshot=originalSnapshot
+        let sessionReview=try await retryChanged.inspectPatchRestore(item,auth:auth)
+        auth.authenticationRevision += 1
+        try await mustFail("retry confirmation crossed auth revision") {
+            try await retryChanged.applyPatch(item,auth:auth,recoveryConfirmation:sessionReview)
+        }
+        try check(Fixture.restores==0 && Fixture.applies==1,"old-session retry reached mutation")
+        let freshRetryReview=try await retryChanged.inspectPatchRestore(item,auth:auth)
+        try await retryChanged.applyPatch(item,auth:auth,recoveryConfirmation:freshRetryReview)
+        try check(Fixture.restores==1 && Fixture.forcedRestore && Fixture.applies==2,"confirmed retry did not restore old bytes before fresh apply")
+        try check(retryChanged.isPatchEnabled(item) && Fixture.receipts[retryProject]?.id != retryReceipt.id,"confirmed retry did not publish a new verified application")
+        try check(FileManager.default.fileExists(atPath:retryReceipt.journalURL.path),"confirmed retry deleted old recovery evidence")
+        try check(!retryChanged.patchOperationInProgress,"confirmed retry retained the shared busy state")
+        // A review for a receipt that has already been retired cannot silently
+        // become a fresh ON request without validating its old transaction.
+        let newReceipt=Fixture.receipts[retryProject]!
+        try await mustFail("old receipt review was reused after successful reapply") {
+            try await retryChanged.applyPatch(item,auth:auth,recoveryConfirmation:freshRetryReview)
+        }
+        try check(Fixture.receipts[retryProject]==newReceipt && Fixture.applies==2,"old retry review replaced a later baseline")
+
+        // Import the exact reference OFF key only for its still-active binding.
+        // This is a one-time hint; a subsequent user request/new receipt wins.
+        try Fixture.reset()
+        let refOFF=FeaturePatchService(),refProject=UUID()
+        try Fixture.establish(refProject);associate(refOFF,item,refProject)
+        let refBinding=refProject.uuidString+":journal:"+Fixture.receipts[refProject]!.id.uuidString
+        Fixture.defaults.set(refBinding,forKey:"patch_applied_catalog_1_fixture_disabledBinding")
+        Fixture.defaults.set(true,forKey:"patch_applied_catalog_1_fixture_recovery")
+        try check(!refOFF.isPatchEnabled(item),"reference OFF binding displayed ON")
+        try check(Fixture.defaults.string(forKey:"patch_requested_binding_catalog_1_fixture")==refBinding,
+                  "reference recovery preference prevented bound-OFF migration")
+        try check(FeaturePatchService().isPatchEnabled(item)==false,"reference OFF migration did not survive restart")
+        for key in Fixture.defaults.dictionaryRepresentation().keys { Fixture.defaults.removeObject(forKey:key) }
+        let importedAfterLoss=FeaturePatchService()
+        try check(!importedAfterLoss.isPatchEnabled(item),"migrated reference OFF disappeared after preference loss")
+        try check(importedAfterLoss.recoveryItems.isEmpty || Fixture.receipts[refProject] != nil,"reference migration changed recovery state")
+        try Fixture.establish(refProject)
+        try check(FeaturePatchService().isPatchEnabled(item),"reference OFF binding leaked into a later receipt")
+
+        try Fixture.reset()
+        let wrongReference=FeaturePatchService(),wrongProject=UUID()
+        try Fixture.establish(wrongProject);associate(wrongReference,item,wrongProject)
+        Fixture.defaults.set(wrongProject.uuidString+":journal:"+UUID().uuidString,
+                             forKey:"patch_applied_catalog_1_fixture_disabledBinding")
+        try check(wrongReference.isPatchEnabled(item),"stale reference OFF was moved to a new receipt")
+
+        try Fixture.reset()
+        let slugReference=FeaturePatchService(),slugProject=UUID()
+        try Fixture.establish(slugProject)
+        slugReference.catalogApplications.associate(slugProject,with:"fixture_fixture")
+        slugReference.catalogApplications.markApplied("fixture_fixture")
+        let slugBinding=slugProject.uuidString+":journal:"+Fixture.receipts[slugProject]!.id.uuidString
+        Fixture.defaults.set(slugBinding,forKey:"patch_applied_fixture_fixture_disabledBinding")
+        try check(!slugReference.isPatchEnabled(item),"slug reference OFF did not migrate to stable catalog identity")
+        try check(slugReference.catalogApplications.projectID(for:"catalog_1_fixture")==slugProject,"reference migration lost project association")
+        try Fixture.establish(slugProject)
+        try check(FeaturePatchService().isPatchEnabled(item),"old slug OFF leaked to a later transaction")
+
+        try Fixture.reset()
+        let referenceAirLift=FeaturePatchService(),referenceAirLiftID=UUID()
+        let referenceOperation=PatchEngineApplicationRecord(projectID:referenceAirLiftID,engine:.airLift,
+            baseline:.unavailable,targetKeys:["com.fixture.app\0Documents/file"],phase:.applied,totalBatches:1)
+        try Fixture.store.save(referenceOperation);associate(referenceAirLift,item,referenceAirLiftID)
+        let operationBinding=referenceAirLiftID.uuidString+":operation:"+referenceOperation.operationID.uuidString
+        Fixture.defaults.set(operationBinding,forKey:"patch_applied_catalog_1_fixture_disabledBinding")
+        try check(!referenceAirLift.isPatchEnabled(item),"reference AirLift operation OFF did not migrate")
+        let nextOperation=PatchEngineApplicationRecord(projectID:referenceAirLiftID,engine:.airLift,
+            baseline:.unavailable,targetKeys:["com.fixture.app\0Documents/file"],phase:.applied,totalBatches:1)
+        try Fixture.store.save(nextOperation)
+        try check(FeaturePatchService().isPatchEnabled(item),"reference AirLift OFF migrated to another operation")
+
         try Fixture.reset()
         let inventory=FeaturePatchService();try Fixture.establish(Fixture.nextProject.id);inventory.refreshRecoveryItems()
         try check(inventory.recoveryItems.count==1,"missing display metadata hid transaction")

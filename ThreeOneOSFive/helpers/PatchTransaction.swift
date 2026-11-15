@@ -158,6 +158,7 @@ struct PatchEngineApplicationStore {
         let status: String
         let records: [Target]
         let createdDirectories: [Target]?
+        let declaredDirectories: [Target]?
         let engineRecord: PatchEngineApplicationRecord?
         var isTerminal: Bool { status == "restored" || status == "rolledBack" }
     }
@@ -181,7 +182,7 @@ struct PatchEngineApplicationStore {
               ["prepared", "applied", "restored", "rolledBack"].contains(journal.status) else {
             throw PatchEngineStateError.invalidRecord
         }
-        for target in journal.records + (journal.createdDirectories ?? []) {
+        for target in journal.records + (journal.createdDirectories ?? []) + (journal.declaredDirectories ?? []) {
             guard try PatchPathValidator.canonicalBundleIdentifier(target.bundleID) == target.bundleID,
                   try PatchPathValidator.canonicalRelativePath(target.relativePath) == target.relativePath,
                   target.containerFingerprint.count == 32 else { throw PatchEngineStateError.invalidRecord }
@@ -193,6 +194,7 @@ struct PatchEngineApplicationStore {
                   record.engine != .airLift, record.baseline == .capturedPriorState,
                   record.phase == .writing, record.completedBatches == 0, record.totalBatches == 0,
                   Set(journal.records.map(\.key)).isSubset(of: Set(record.targetKeys)),
+                  journal.declaredDirectories.map({ Set($0.map(\.key)).union(journal.records.map(\.key)) == Set(record.targetKeys) }) ?? true,
                   (journal.createdDirectories ?? []).allSatisfy({ directory in
                       // Auto-created parents need not be explicit package
                       // targets, but must belong to a bound payload/directory.
@@ -589,6 +591,7 @@ enum PatchTransaction {
         let records: [Record]
         var createdDirectories: [DirectoryRecord]?
         let engineRecord: PatchEngineApplicationRecord?
+        let declaredDirectories: [DirectoryRecord]?
     }
 
     private struct ResolvedRule {
@@ -875,7 +878,11 @@ enum PatchTransaction {
             status: .prepared,
             records: records,
             createdDirectories: plannedDirectories,
-            engineRecord: engineRecord
+            engineRecord: engineRecord,
+            declaredDirectories: project.directories.map { directory in
+                DirectoryRecord(bundleID: directory.bundleID, relativePath: directory.relativePath,
+                    containerFingerprint: containerFingerprint(roots[directory.bundleID]!))
+            }
         )
         do {
             try writeJournal(journal, to: journalURL)
@@ -1333,8 +1340,29 @@ enum PatchTransaction {
                 && digest(rule.replacementData) == record.replacementDigest
         }) else { return .recoveryRequired }
         let roots = try resolvedRoots(journal: journal, containerResolver: containerResolver)
+        let requestedDirectoryKeys = Set(try project.directories.map {
+            try PatchPathValidator.canonicalBundleIdentifier($0.bundleID) + "\0" + PatchPathValidator.canonicalRelativePath($0.relativePath)
+        })
+        let fileKeys = Set(journal.records.map { $0.bundleID + "\0" + $0.relativePath })
+        let boundRecord = try journal.engineRecord ?? PatchEngineApplicationStore(
+            backupRoot: receipt.journalURL.deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+        ).read(receipt.projectID)
+        let boundDirectoryKeys = boundRecord.map { Set($0.targetKeys).subtracting(fileKeys) }
+        let recordedDirectoryKeys = journal.declaredDirectories.map { Set($0.map { $0.bundleID + "\0" + $0.relativePath }) }
+            ?? boundDirectoryKeys
+        guard requestedDirectoryKeys.isEmpty ? (recordedDirectoryKeys?.isEmpty ?? true)
+                : recordedDirectoryKeys == requestedDirectoryKeys,
+              boundDirectoryKeys == nil || recordedDirectoryKeys == boundDirectoryKeys else { return .recoveryRequired }
+        for directory in project.directories {
+            let root = try roots[directory.bundleID] ?? PatchPathValidator.canonicalFileURL(containerResolver(directory.bundleID))
+            let target = try PatchPathValidator.resolveContainedTargetURL(relativePath: directory.relativePath, containerRoot: root)
+            try targetScope.prepare(target, root: root, allowMissing: true)
+            guard let metadata = try targetScope.statItem(target),
+                  metadata.st_mode & mode_t(S_IFMT) == mode_t(S_IFDIR) else { return .recoveryRequired }
+        }
         let records = try resolvedRecords(journal.records, transactionDirectory: receipt.journalURL.deletingLastPathComponent(),
             roots: roots, fileManager: fileManager)
+        try targetScope.validateBindings()
         return try changedTargets(in: records, fileManager: fileManager).isEmpty ? .applied : .recoveryRequired
     }
 
@@ -1376,7 +1404,8 @@ enum PatchTransaction {
             throw PatchPackageError.restoreFailed
         }
         var seen = Set<String>()
-        return (journal.records.map(\.bundleID) + (journal.createdDirectories ?? []).map(\.bundleID))
+        return (journal.records.map(\.bundleID) + (journal.createdDirectories ?? []).map(\.bundleID)
+            + (journal.declaredDirectories ?? []).map(\.bundleID))
             .filter { seen.insert($0).inserted }
     }
 
@@ -1398,6 +1427,7 @@ enum PatchTransaction {
         var roots: [String: URL] = [:]
         let identities = journal.records.map { ($0.bundleID, $0.containerFingerprint) }
             + (journal.createdDirectories ?? []).map { ($0.bundleID, $0.containerFingerprint) }
+            + (journal.declaredDirectories ?? []).map { ($0.bundleID, $0.containerFingerprint) }
         for (bundleID, expectedFingerprint) in identities {
             if let root = roots[bundleID] {
                 guard containerFingerprint(root) == expectedFingerprint else {

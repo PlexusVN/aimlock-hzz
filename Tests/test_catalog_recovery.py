@@ -22,6 +22,7 @@ METHODS = [
     'private func writeRecoveryMetadata(', 'private func setRequestedEnabled(',
     'private func requestedBinding(', 'private func requestedCatalogProjectID(',
     'private func migrateRequestedBinding(', 'private func requestedStateValue(',
+    'private func migrateReferenceDisabledBinding(',
     'private func setProjectRequestedEnabled(', 'func isPatchEnabled(',
     'private func requestedEnabled(', 'func recordPatchOffFailure(', 'func recordRecoveryOffFailure(',
     'private func clearRestoredAssociations(', 'func isPatchApplied(',

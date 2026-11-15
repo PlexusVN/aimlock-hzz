@@ -610,7 +610,11 @@ final class FeaturePatchService: ObservableObject {
 
     // MARK: - Apply / Restore
 
-    func applyPatch(_ patch: PatchItem, auth: AuthManager) async throws {
+    func applyPatch(_ patch: PatchItem, auth: AuthManager,
+                    recoveryConfirmation: PatchRestoreConfirmation? = nil) async throws {
+        if let recoveryConfirmation, recoveryConfirmation.authRevision != auth.authenticationRevision {
+            throw PatchRestoreError.confirmationExpired
+        }
         let requestedIdentity = patchStorageSlug(patch)
         setRequestedEnabled(false, identity: requestedIdentity)
         guard auth.authState == .verified else { throw FeaturePatchError.notAuthenticated }
@@ -625,7 +629,8 @@ final class FeaturePatchService: ObservableObject {
                 throw FeaturePatchError.notAuthenticated
             }
             try await self.applyPatchInOperation(patch, auth: auth, operationID: operationID,
-                                                  expectedRevision: requestedAuthRevision)
+                                                  expectedRevision: requestedAuthRevision,
+                                                  recoveryConfirmation: recoveryConfirmation)
         } } catch {
             if !Task.isCancelled, auth.authenticationRevision == requestedAuthRevision {
                 setRequestedEnabled(false, identity: requestedIdentity)
@@ -635,7 +640,8 @@ final class FeaturePatchService: ObservableObject {
     }
 
     private func applyPatchInOperation(_ patch: PatchItem, auth: AuthManager, operationID: UUID,
-                                       expectedRevision: UInt64) async throws {
+                                       expectedRevision: UInt64,
+                                       recoveryConfirmation: PatchRestoreConfirmation? = nil) async throws {
         try await PatchFilesystemGate.shared.validate(operationID)
         guard auth.authState == .verified, auth.authenticationRevision == expectedRevision else {
             throw FeaturePatchError.notAuthenticated
@@ -654,6 +660,9 @@ final class FeaturePatchService: ObservableObject {
             let activeIDs = try activeCatalogProjectIDs(for: slug)
             guard activeIDs.count <= 1 else { throw PatchRestoreError.recoveryRequired }
             let activeProjectID = activeIDs.first
+            if let recoveryConfirmation, recoveryConfirmation.projectID != activeProjectID {
+                throw PatchRestoreError.confirmationExpired
+            }
             print("[FeaturePatch] applying patch: \(patch.name) (slug: \(patch.slug))")
             // Remove only this catalog item's old reusable download from pre-v2.
             try? FileManager.default.removeItem(at: localPatchURL(patch))
@@ -705,7 +714,8 @@ final class FeaturePatchService: ObservableObject {
             try NetworkAccessGate.shared.validateGeneration(networkGeneration)
             guard auth.authState == .verified, auth.authenticationRevision == authRevision else { throw FeaturePatchError.notAuthenticated }
             if let activeProjectID {
-                if project.id == activeProjectID, let oldReceipt = try restoreReceipt(activeProjectID) {
+                if recoveryConfirmation == nil, project.id == activeProjectID,
+                   let oldReceipt = try restoreReceipt(activeProjectID) {
                     let commitProject = project
                     let state = try await DirectPatchExecutor.run(validation: {
                         try NetworkAccessGate.shared.validateGeneration(networkGeneration)
@@ -737,7 +747,7 @@ final class FeaturePatchService: ObservableObject {
                 // recovery UI; this retry never invents force permission.
                 do {
                     try await restoreProjectInOperation(activeProjectID, auth: auth, revision: authRevision,
-                        operationID: operationID, confirmation: nil)
+                        operationID: operationID, confirmation: recoveryConfirmation)
                 } catch {
                     throw PatchRestoreError.retryNeedsRecovery(error.localizedDescription)
                 }
@@ -1120,19 +1130,63 @@ final class FeaturePatchService: ObservableObject {
             }
             return value
         }
+        if let identity, migrateReferenceDisabledBinding(identity: identity, projectID: projectID, binding: binding) {
+            return false
+        }
         return nil
+    }
+
+    /// The supplied reference stores an explicit OFF against its transaction,
+    /// not against a whole catalog/project forever. Adopt only that exact live
+    /// binding; never apply a previous journal's choice to a later transaction.
+    private func migrateReferenceDisabledBinding(identity: String, projectID: UUID, binding: String) -> Bool {
+        let legacyKey = "patch_applied_" + identity + "_disabledBinding"
+        guard binding != "unresolved", !binding.hasSuffix(":unknown-operation"),
+              defaults.string(forKey: legacyKey) == binding,
+              StorageEngineCoordinator.shared.projectApplicationState(projectID)?.requiresRestore == true else {
+            return false
+        }
+        requestedStateOverrides[identity] = false
+        requestedStateBindings[identity] = binding
+        requestedProjectOverrides[projectID] = false
+        requestedProjectBindings[projectID] = binding
+        defaults.set(false, forKey: "patch_requested_enabled_" + identity)
+        defaults.set(binding, forKey: "patch_requested_binding_" + identity)
+        defaults.set(false, forKey: "patch_requested_project_" + projectID.uuidString)
+        defaults.set(binding, forKey: "patch_requested_project_binding_" + projectID.uuidString)
+        do {
+            var rows = try readRecoveryMetadata()
+            var found = false
+            for index in rows.indices where rows[index].projectID == projectID && rows[index].catalogIdentity == identity {
+                rows[index].requestedEnabled = false
+                rows[index].requestedBinding = binding
+                found = true
+            }
+            if !found {
+                rows.append(CatalogRecoveryMetadata(projectID: projectID, title: "", catalogIdentity: identity,
+                    requestedEnabled: false, requestedBinding: binding))
+            }
+            try writeRecoveryMetadata(rows)
+        } catch {
+            // The old bound OFF remains intact as the next-launch migration
+            // hint when display metadata is temporarily unavailable.
+        }
+        return true
     }
 
     func isPatchEnabled(_ patch: PatchItem) -> Bool {
         let identity = patchStorageSlug(patch)
-        guard patchApplicationState(patch) == .applied else { return false }
+        let state = patchApplicationState(patch)
+        guard state.requiresRestore else { return false }
         do {
             let activeIDs = try activeCatalogProjectIDs(for: identity)
             guard activeIDs.count == 1, let projectID = activeIDs.first else { return false }
             let metadata = try readRecoveryMetadata().first {
                 $0.catalogIdentity == identity && $0.projectID == projectID
             }
-            return requestedStateValue(projectID: projectID, identity: identity, metadata: metadata) ?? true
+            let requested = requestedStateValue(projectID: projectID, identity: identity, metadata: metadata)
+            guard state == .applied else { return false }
+            return requested ?? true
         } catch { return false }
     }
 
@@ -1268,6 +1322,17 @@ final class FeaturePatchService: ObservableObject {
     private func patchStorageSlug(_ patch: PatchItem) -> String {
         let stable = safeSlug("catalog_\(patch.id)_" + (patch.artifactVariant ?? "legacy"))
         let legacy = safeSlug(patch.slug + "_" + (patch.artifactVariant ?? "legacy"))
+        // Capture the reference's old slug hint before registry migration drops
+        // the old association. Validate it against the actual current receipt.
+        let oldID = catalogApplications.projectID(for: legacy)
+        let currentID = catalogApplications.projectID(for: stable)
+        if let id = currentID ?? oldID, currentID == nil || oldID == nil || currentID == oldID,
+           defaults.string(forKey: "patch_applied_" + stable + "_disabledBinding") == nil,
+           let oldBinding = defaults.string(forKey: "patch_applied_" + legacy + "_disabledBinding"),
+           oldBinding == requestedBinding(projectID: id),
+           StorageEngineCoordinator.shared.projectApplicationState(id)?.requiresRestore == true {
+            defaults.set(oldBinding, forKey: "patch_applied_" + stable + "_disabledBinding")
+        }
         catalogApplications.migrateIdentity(from: legacy, to: stable)
         return stable
     }
@@ -1984,6 +2049,16 @@ enum PatchRestoreError: LocalizedError {
     case recoveryRequired
     case confirmationExpired
     case retryNeedsRecovery(String)
+
+    static func requiresRestoreReview(_ error: Error) -> Bool {
+        var cause = error
+        for _ in 0..<4 {
+            guard let wrapped = cause as? PatchOperationError else { break }
+            cause = wrapped.underlying
+        }
+        if case .retryNeedsRecovery = cause as? PatchRestoreError { return true }
+        return false
+    }
     var errorDescription: String? {
         switch self {
         case .airLiftRestoreUnsupported:

@@ -30,7 +30,8 @@ struct PatchRestoreConfirmation { let authRevision: UInt64 = 1 }
     private func patchStorageSlug(_ patch: PatchItem) -> String { "fixture" }
     private func setRequestedEnabled(_ value: Bool, identity: String) {}
     private func applyPatchInOperation(_ patch: PatchItem, auth: AuthManager, operationID: UUID,
-                                       expectedRevision: UInt64) async throws {
+                                       expectedRevision: UInt64,
+                                       recoveryConfirmation: PatchRestoreConfirmation? = nil) async throws {
         try await PatchFilesystemGate.shared.validate(operationID)
         applied += 1
     }

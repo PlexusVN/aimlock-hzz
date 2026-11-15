@@ -1,3 +1,7 @@
+## Build 2.4 (42): Hoàn tất đối chiếu và sửa các luồng còn thiếu
+
+Sửa toàn bộ các điểm A01–A10 trong báo cáo so sánh build 41: recovery identity/download, binding OFF legacy, re-enable qua bảng xác nhận hiện có, exact lookup với hints cũ, directory-only verification, HWID fallback tương thích và text quyền mạng. Không thêm panel recovery hoặc đổi cấu hình Auth/engine. Xem [thay đổi và giới hạn kiểm chứng](docs/REFERENCE_PARITY_FIX_42.md).
+
 ## Build 2.4 (41): Áp dụng luồng tham chiếu
 
 Ghép các sửa patch/restore từ source tham chiếu người dùng cung cấp: journal schema 3 có provenance bất biến, kiểm tra kích thước record đối xứng, final restore read-back, Bundle-ID lookup trước inode scan và kiểm bằng chứng target dưới grant mới. Giữ quét ban đầu không cần game, OFF lỗi vẫn OFF và không hiện lại khối recovery. Tên hiển thị/pairing cùng sản phẩm Xcode dùng Aimlock Hzz/AimlockHzz. Xem [phạm vi ghép source và tương thích](docs/ASTRA_REFERENCE_PORT_41.md).

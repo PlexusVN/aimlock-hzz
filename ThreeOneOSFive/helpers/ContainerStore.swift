@@ -219,7 +219,8 @@ enum ContainerStore {
     /// app or readable bundle identifier. Scan the complete existing estimated
     /// application-container inode window; this is not a claim to enumerate
     /// every file or grant access outside worse_query's supported scope.
-    static func prepareWorseQueryFilesystemAccess(forceScan: Bool = false) throws {
+    static func prepareWorseQueryFilesystemAccess(forceScan: Bool = false,
+        ownContainerPath: String? = nil) throws {
         guard discoveryLock.try() else { throw WorseQueryError.discoveryInProgress }
         defer { discoveryLock.unlock() }
         worseQueryGeneralCandidates = []
@@ -277,6 +278,35 @@ enum ContainerStore {
                 if last == maximum { break }
                 first = last + 1
             }
+            if readable == 0 {
+                // Anonymous enumeration is not exhaustive. Prove the same
+                // scoped read capability against this app's known container,
+                // without requiring any installed game or trusting a URL alone.
+                try ContainerScanProgress.shared.checkCancellation(sessionID)
+                let ownRoot = ContainerDiscoveryMerger.canonicalPath(ownContainerPath ?? NSHomeDirectory())
+                if isApplicationContainerPath(ownRoot) {
+                    candidates += 1
+                    do {
+                        let handle = try WorseQueryHelper.acquireAccess(for: ownRoot)
+                        defer { WorseQueryHelper.releaseAccess(handle: handle) }
+                        grants += 1
+                        try ContainerScanProgress.shared.checkCancellation(sessionID)
+                        _ = try FileManager.default.contentsOfDirectory(atPath: ownRoot)
+                        readable += 1
+                        seen.insert(ownRoot)
+                        ContainerScanProgress.shared.checkpoint(sessionID,
+                            message: "Đã xác minh quyền đọc thư mục ứng dụng hiện tại; không cần tìm game.",
+                            candidates: candidates, grants: grants, readable: readable)
+                    } catch is CancellationError { throw CancellationError() }
+                    catch {
+                        if (error as? WorseQueryError)?.blocksContainerPreparation == true { throw error }
+                        lastGrantError = error
+                        ContainerScanProgress.shared.checkpoint(sessionID,
+                            message: "Chưa xác minh được quyền đọc thư mục ứng dụng hiện tại.",
+                            candidates: candidates, grants: grants, readable: readable)
+                    }
+                }
+            }
             guard readable > 0 else {
                 if grants == 0, let lastGrantError { throw lastGrantError }
                 throw WorseQueryError.preparationRequired
@@ -302,6 +332,7 @@ enum ContainerStore {
             guard WorseQueryHelper.isAppGroupConfigured else { throw WorseQueryError.appGroupUnavailable }
             ContainerScanProgress.shared.checkpoint(sessionID, message: try WorseQueryHelper.preparationDiagnostics())
             var found: [String: String] = [:]
+            var systemBoundTargets = Set<String>()
             var conflictingTargets = Set<String>()
             var seen = Set<String>()
             var inspectedEvidence = Set<String>()
@@ -355,8 +386,19 @@ enum ContainerStore {
                 }
                 guard targets.contains(identifier) else { return }
                 guard !conflictingTargets.contains(identifier) else { return }
+                // A fresh exact system lookup outranks residual anonymous
+                // metadata/cache hints. The transaction revalidates that binding
+                // under its own grant; an old UUID must not replace it here.
+                if boundBundleID == nil, systemBoundTargets.contains(identifier) { return }
                 if let other = found.first(where: { $0.key != identifier && $0.value == clean })?.key {
+                    if boundBundleID == nil, systemBoundTargets.contains(other) {
+                        found.removeValue(forKey: identifier)
+                        conflictingTargets.insert(identifier)
+                        UserDefaults.standard.removeObject(forKey: "astra.resolved_container.\(identifier)")
+                        return
+                    }
                     found.removeValue(forKey: other)
+                    systemBoundTargets.remove(other)
                     conflictingTargets.formUnion([other, identifier])
                     for target in [other, identifier] {
                         UserDefaults.standard.removeObject(forKey: "astra.resolved_container.\(target)")
@@ -374,26 +416,14 @@ enum ContainerStore {
                     return
                 }
                 found[identifier] = clean
+                if boundBundleID != nil { systemBoundTargets.insert(identifier) }
                 UserDefaults.standard.set(clean, forKey: "astra.resolved_container.\(identifier)")
                 ContainerScanProgress.shared.checkpoint(sessionID, message: "Đã đọc và xác minh \(identifier).", matched: found.count)
             }
 
-            // A remembered UUID is only a candidate: re-read its identity with a
-            // fresh grant. A stale UUID cannot remain published after a failed check.
-            for bundleID in targets.sorted() {
-                if let cached = UserDefaults.standard.string(forKey: "astra.resolved_container.\(bundleID)") {
-                    do { try inspect(cached) }
-                    catch is CancellationError { throw CancellationError() }
-                    catch {
-                        if (error as? WorseQueryError)?.blocksContainerPreparation == true { throw error }
-                        ContainerScanProgress.shared.checkpoint(sessionID, message: "Cache không dùng được: \(error.localizedDescription)")
-                    }
-                    if found[bundleID] == nil { UserDefaults.standard.removeObject(forKey: "astra.resolved_container.\(bundleID)") }
-                }
-            }
             // IPA 3105 2.2 resolves known identifiers before its anonymous scan.
             // This path never calls MCMActivateContainerPath or bad_query.
-            for bundleID in targets.sorted() where found[bundleID] == nil {
+            for bundleID in targets.sorted() {
                 try ContainerScanProgress.shared.checkCancellation(sessionID)
                 ContainerScanProgress.shared.checkpoint(sessionID,
                     message: "Tra đường dẫn theo Bundle ID \(bundleID) bằng MCM (chưa cấp quyền).")
@@ -420,10 +450,28 @@ enum ContainerStore {
                     }
                 }
             }
+            // All exact results are checked as a set before returning, so
+            // two identifiers cannot claim one root. Anonymous residual UUIDs
+            // are irrelevant once every requested target has a current binding.
+            if found.count == targets.count { return found }
+
+            // A remembered UUID is only a candidate: re-read its identity with a
+            // fresh grant. A stale UUID cannot remain published after a failed check.
+            for bundleID in targets.sorted() where !systemBoundTargets.contains(bundleID) {
+                if let cached = UserDefaults.standard.string(forKey: "astra.resolved_container.\(bundleID)") {
+                    do { try inspect(cached) }
+                    catch is CancellationError { throw CancellationError() }
+                    catch {
+                        if (error as? WorseQueryError)?.blocksContainerPreparation == true { throw error }
+                        ContainerScanProgress.shared.checkpoint(sessionID, message: "Cache không dùng được: \(error.localizedDescription)")
+                    }
+                    if found[bundleID] == nil { UserDefaults.standard.removeObject(forKey: "astra.resolved_container.\(bundleID)") }
+                }
+            }
             // The general scan already enumerated these UUID candidates. Do
             // not walk the inode window again for the first real operation.
             // Reacquire each grant and read identity now; a hint is not access
-            // or proof of its target. Inspect all hints to detect conflicts.
+            // or proof of its target. Current system-bound targets retain priority.
             if !forceScan {
                 for candidate in worseQueryGeneralCandidates {
                     do { try inspect(candidate) }

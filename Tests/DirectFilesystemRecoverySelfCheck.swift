@@ -467,6 +467,42 @@ enum ContainerStore {
             try check(!fm.fileExists(atPath: directory.appendingPathComponent("file").path), "unknown directory ownership does not block exact new-file recovery")
             try check(fm.fileExists(atPath: directory.path), "legacy or unpersisted ownership preserves empty directory")
         }
+        // Re-enabling a directory-only or mixed project must verify the same
+        // declared directory set and the actual directory type/existence.
+        do {
+            let (game, backup) = try fixture("directory-only-reenable")
+            let target = game.appendingPathComponent("Documents/effect")
+            let patch = PatchProject(name: "directory-only", directories: [PatchDirectory(bundleID: "com.fixture.game", relativePath: "Documents/effect")], rules: [])
+            let receipt = try PatchTransaction.apply(project: patch, backupRoot: backup, containerResolver: { _ in game })
+            try check(try PatchTransaction.inspectExistingApplication(receipt: receipt, project: patch, containerResolver: { _ in game }) == .applied, "existing directory-only application is verified")
+            var revised = patch
+            revised.directories = [PatchDirectory(bundleID: "com.fixture.game", relativePath: "Documents/other")]
+            try check(try PatchTransaction.inspectExistingApplication(receipt: receipt, project: revised, containerResolver: { _ in game }) == .recoveryRequired, "same ID with changed directory targets cannot adopt old receipt")
+            revised.directories = []
+            try check(try PatchTransaction.inspectExistingApplication(receipt: receipt, project: revised, containerResolver: { _ in game }) == .recoveryRequired, "removed directory declaration cannot silently adopt old receipt")
+            try fm.removeItem(at: target)
+            try check(try PatchTransaction.inspectExistingApplication(receipt: receipt, project: patch, containerResolver: { _ in game }) == .recoveryRequired, "missing required directory is not applied")
+            try Data([1]).write(to: target)
+            try check(try PatchTransaction.inspectExistingApplication(receipt: receipt, project: patch, containerResolver: { _ in game }) == .recoveryRequired, "file replacing required directory is not applied")
+            try fm.removeItem(at: target)
+            try fm.createDirectory(at: target, withIntermediateDirectories: true)
+            var legacy = try PropertyListSerialization.propertyList(from: Data(contentsOf: receipt.journalURL), format: nil) as! [String: Any]
+            legacy.removeValue(forKey: "declaredDirectories")
+            try PropertyListSerialization.data(fromPropertyList: legacy, format: .binary, options: 0).write(to: receipt.journalURL, options: .atomic)
+            try check(try PatchTransaction.inspectExistingApplication(receipt: receipt, project: patch, containerResolver: { _ in game }) == .applied, "legacy journal derives declared directories from bound provenance")
+        }
+        do {
+            let (game, backup) = try fixture("preexisting-directory-reenable")
+            let target = game.appendingPathComponent("Documents/existing")
+            try fm.createDirectory(at: target, withIntermediateDirectories: false)
+            let patch = PatchProject(name: "preexisting-directory", directories: [PatchDirectory(bundleID: "com.fixture.game", relativePath: "Documents/existing")], rules: [])
+            let receipt = try PatchTransaction.apply(project: patch, backupRoot: backup, containerResolver: { _ in game })
+            try check(try PatchTransaction.inspectExistingApplication(receipt: receipt, project: patch, containerResolver: { _ in game }) == .applied, "preexisting directory has durable target identity even without createdDirectory record")
+            try fm.removeItem(at: target)
+            try check(try PatchTransaction.inspectExistingApplication(receipt: receipt, project: patch, containerResolver: { _ in game }) == .recoveryRequired, "missing preexisting directory blocks adoption")
+            try PatchTransaction.restore(receipt: receipt, containerResolver: { _ in game })
+            try check(PatchTransaction.latestRecordedApplicationState(projectID: patch.id, backupRoot: backup) == .off, "directory-only recovery can terminate without inventing files")
+        }
         print("Direct filesystem recovery: \(checks) checks passed")
     }
 }
