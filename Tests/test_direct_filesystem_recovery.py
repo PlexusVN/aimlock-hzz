@@ -26,6 +26,19 @@ def production_sources():
 class DirectFilesystemRecovery(unittest.TestCase):
     @unittest.skipUnless(sys.platform == 'darwin' and shutil.which('swiftc'),
                          'requires macOS CryptoKit and Darwin file APIs')
+    def test_reference_provenance_and_final_restore_verification(self):
+        with tempfile.TemporaryDirectory() as folder:
+            folder = Path(folder)
+            source = folder / 'ActualTransaction.swift'
+            source.write_text(production_sources(), encoding='utf-8')
+            binary = folder / 'reference-provenance-restore'
+            subprocess.run(['swiftc', '-swift-version', '5', str(source),
+                            str(ROOT / 'Tests/DirectTransactionProvenanceSelfCheck.swift'),
+                            '-o', str(binary)], check=True)
+            subprocess.run([str(binary)], check=True)
+
+    @unittest.skipUnless(sys.platform == 'darwin' and shutil.which('swiftc'),
+                         'requires macOS CryptoKit and Darwin file APIs')
     def test_actual_temporary_files_and_recovery(self):
         with tempfile.TemporaryDirectory() as folder:
             folder = Path(folder)
