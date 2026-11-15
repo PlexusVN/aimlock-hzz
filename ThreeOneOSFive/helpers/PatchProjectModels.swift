@@ -266,7 +266,7 @@ struct PatchOperationError: LocalizedError {
         if let package = underlying as? PatchPackageError {
             switch package {
             case .targetAppUnavailable:
-                detail = "Chưa truy cập được container ứng dụng đích. Hãy cài/mở ứng dụng đích và chạy lại bước cấp quyền trong Astra."
+                detail = "Chưa truy cập được container ứng dụng đích. Hãy cài/mở ứng dụng đích và chạy lại bước cấp quyền trong Aimlock Hzz."
             case .applyFailed:
                 detail = "Không ghi được file hoặc tạo bản sao lưu. Hãy kiểm tra quyền truy cập container và dung lượng trống."
             case .invalidPasswordOrCorruptedPackage:

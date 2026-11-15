@@ -42,7 +42,7 @@ enum ProtectedDownloadError: LocalizedError {
             case "recipient_upgrade_required", "recipient_enrollment_required", "device_environment_upgrade_required", "protocol_required":
                 return "Bản cài đặt chưa đáp ứng giao thức bảo mật hiện tại. Hãy cài đúng bản ứng dụng mới nhất được cung cấp."
             case "download_server_update_required":
-                return "Máy chủ chưa hỗ trợ luồng tải ổn định của bản Astra này. Hãy cập nhật server rồi thử lại. Mã: download_server_update_required."
+                return "Máy chủ chưa hỗ trợ luồng tải ổn định của bản Aimlock Hzz này. Hãy cập nhật server rồi thử lại. Mã: download_server_update_required."
             case "app_integrity_rejected", "integrity_report_invalid", "release_upgrade_required":
                 return "Máy chủ chưa chấp nhận bản ứng dụng này. Hãy dùng đúng IPA được cung cấp và liên hệ hỗ trợ nếu vẫn lỗi."
             case "device_environment_rejected", "device_jailbreak_quarantined":

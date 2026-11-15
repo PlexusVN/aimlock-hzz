@@ -132,7 +132,7 @@ final class AirLiftTunnelManager: ObservableObject {
             }
 
             if !routeFound {
-                statusMessage = "Không tìm thấy route LocalDevVPN tới 10.7.0.1. Hãy mở LocalDevVPN, bật kết nối rồi trở lại Astra."
+                statusMessage = "Không tìm thấy route LocalDevVPN tới 10.7.0.1. Hãy mở LocalDevVPN, bật kết nối rồi trở lại Aimlock Hzz."
             }
 
             return TunnelProbeResult(

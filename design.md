@@ -41,7 +41,7 @@ Màu trạng thái xanh/đỏ/vàng chỉ dùng để phân biệt thành công,
 
 ## Ranh giới thay đổi
 
-Giữ nguyên bundle identifier, phiên bản/build, storage key, notification name, API, endpoint, logic license/HWID, mã hóa, DB, engine, tác vụ ghi/khôi phục và điều kiện pairing. Những identifier chứa Astra/NovaX vẫn được giữ khi là hợp đồng nội bộ. Tên thiết bị được dịch vụ ghép đôi quảng bá vẫn là Astra; hướng dẫn `Pair with Astra` giữ đúng tên thật của dịch vụ.
+Giữ nguyên bundle identifier, phiên bản/build, storage key, notification name, API, endpoint, logic license/HWID, mã hóa, DB, engine, tác vụ ghi/khôi phục và điều kiện pairing. Những identifier chứa Astra/NovaX vẫn được giữ khi là hợp đồng nội bộ. Tên hiển thị của thiết bị ghép đôi hiện là Aimlock Hzz; hướng dẫn `Pair with Aimlock Hzz` khớp tên thực được quảng bá. Các identifier tương thích vẫn giữ theo hợp đồng nội bộ.
 
 `Aimlock Hzz-WebPreview/sync-source.py` đồng bộ thông tin và ảnh từ `Astra-Fixed/Aimlock Hzz`. Bản xem trước dùng dữ liệu minh họa, không xác thực hoặc thao tác với game thật.
 

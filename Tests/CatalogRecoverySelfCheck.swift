@@ -70,7 +70,7 @@ import Foundation
         try check(first.recoveryItems[0].title=="FeatureOne","display metadata did not sanitize control characters")
         let metadataURL=Fixture.root.appendingPathComponent(".catalog-recovery.plist")
         let rows=try PropertyListSerialization.propertyList(from:Data(contentsOf:metadataURL),format:nil) as! [[String:Any]]
-        try check(Set(rows[0].keys)==Set(["projectID","title","catalogIdentity","requestedEnabled"]),"recovery metadata contains payload/auth/URL fields")
+        try check(Set(rows[0].keys)==Set(["projectID","title","catalogIdentity","requestedEnabled","requestedBinding"]),"recovery metadata contains payload/auth/URL fields")
         for key in Fixture.defaults.dictionaryRepresentation().keys { Fixture.defaults.removeObject(forKey:key) }
         let restarted=FeaturePatchService();restarted.refreshRecoveryItems()
         try check(restarted.recoveryItems.count==1 && restarted.recoveryItems[0].title=="FeatureOne","restart or preference loss hid durable recovery")
@@ -235,6 +235,58 @@ import Foundation
         try await mustFail("recovery OFF failure ignored") { try await afterOffRestart.restoreRecovery(recoveryRetry,auth:auth) }
         try check(!afterOffRestart.isPatchEnabled(item) && afterOffRestart.recoveryItems.first?.requestedEnabled==false,
                   "recovery failure did not publish OFF intent with retained recovery history")
+
+        // Explicit OFF belongs to one transaction, not the whole catalog item
+        // or project UUID. A sidecar repair keeps it; a new journal does not.
+        try Fixture.reset()
+        let bound=FeaturePatchService()
+        try await bound.applyPatch(item,auth:auth)
+        let boundProject=Fixture.nextProject.id,boundReceipt=Fixture.receipts[Fixture.nextProject.id]!
+        Fixture.failRestore=true
+        try await mustFail("binding fixture OFF failure ignored") { try await bound.restorePatch(item,auth:auth) }
+        try check(!bound.isPatchEnabled(item),"bound OFF did not apply to its receipt")
+        let unchangedSidecar=try Fixture.store.read(boundProject)!
+        var repairedSidecar=unchangedSidecar
+        repairedSidecar.phase = .recoveryRequired
+        try Fixture.store.save(repairedSidecar)
+        let repairedRestart=FeaturePatchService()
+        try check(!repairedRestart.isPatchEnabled(item),"repair of the same journal sidecar reset requested OFF")
+        try check(Fixture.receipts[boundProject]==boundReceipt,"switch binding changed its original receipt")
+        try Fixture.establish(boundProject)
+        try check(Fixture.receipts[boundProject]?.id != boundReceipt.id,"new transaction fixture reused its journal")
+        try check(bound.isPatchEnabled(item),"in-memory old OFF leaked into a new journal for the same project")
+        let newJournalRestart=FeaturePatchService()
+        try check(newJournalRestart.isPatchEnabled(item),"persisted old OFF leaked into a new journal after restart")
+        for key in Fixture.defaults.dictionaryRepresentation().keys { Fixture.defaults.removeObject(forKey:key) }
+        try check(FeaturePatchService().isPatchEnabled(item),"old metadata-only OFF leaked into a new journal")
+
+        // Migrate unbound build-39/40 intent once against the current receipt.
+        try Fixture.reset()
+        let legacy=FeaturePatchService(),legacyProject=UUID()
+        try Fixture.establish(legacyProject);associate(legacy,item,legacyProject)
+        Fixture.defaults.set(false,forKey:"patch_requested_enabled_catalog_1_fixture")
+        try check(!legacy.isPatchEnabled(item),"legacy unbound OFF was reset during migration")
+        let legacyBinding=Fixture.defaults.string(forKey:"patch_requested_binding_catalog_1_fixture")
+        try check(legacyBinding?.contains(Fixture.receipts[legacyProject]!.id.uuidString)==true,
+                  "legacy OFF was not bound to its current journal")
+        try Fixture.establish(legacyProject)
+        try check(legacy.isPatchEnabled(item),"migrated legacy OFF still leaked into the next journal")
+
+        // AirLift has no backup journal: bind its explicit OFF to operation ID.
+        try Fixture.reset()
+        let airLift=FeaturePatchService(),airLiftProject=UUID()
+        let firstAirLift=PatchEngineApplicationRecord(projectID:airLiftProject,engine:.airLift,
+            baseline:.unavailable,targetKeys:["com.fixture.app\0Documents/file"],phase:.applied,totalBatches:1)
+        try Fixture.store.save(firstAirLift);associate(airLift,item,airLiftProject)
+        airLift.recordPatchOffFailure(item,requestedRevision:auth.authenticationRevision,auth:auth)
+        try check(!airLift.isPatchEnabled(item),"AirLift operation OFF was not retained")
+        try Fixture.store.save(firstAirLift)
+        try check(!FeaturePatchService().isPatchEnabled(item),"same AirLift operation lost OFF after restart")
+        let secondAirLift=PatchEngineApplicationRecord(projectID:airLiftProject,engine:.airLift,
+            baseline:.unavailable,targetKeys:["com.fixture.app\0Documents/file"],phase:.applied,totalBatches:1)
+        try Fixture.store.save(secondAirLift)
+        try check(airLift.isPatchEnabled(item),"old AirLift OFF leaked into a different operation")
+        try check(FeaturePatchService().isPatchEnabled(item),"persisted AirLift OFF leaked into a different operation")
 
         try Fixture.reset()
         let inventory=FeaturePatchService();try Fixture.establish(Fixture.nextProject.id);inventory.refreshRecoveryItems()

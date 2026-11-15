@@ -68,9 +68,10 @@ enum ExploitSupportPolicy { enum Provider { case legacy3105, worseQuery }
 }
 enum Calls {
  static var released:[Int64]=[], invalidated:[String]=[], identities:[String:String]=[:]
+ static var mcmPaths:[String:String]=[:], lsPaths:[String:String]=[:], conflict=false
  static var events:[String]=[], unreadable=Set<String>(), operationRan=false
  static var next:Int64=0
- static func reset() { released=[]; invalidated=[]; identities=[:]; events=[]; unreadable=[]; operationRan=false; next=0 }
+ static func reset() { released=[]; invalidated=[]; identities=[:]; mcmPaths=[:]; lsPaths=[:]; conflict=false; events=[]; unreadable=[]; operationRan=false; next=0 }
 }
 func sandbox_extension_release_handle(_ value:Int64) { Calls.released.append(value) }
 enum WorseQueryHelper {
@@ -83,11 +84,23 @@ enum ContainerStore {
  static func grantContainerAccess(_ path:String)->Int64 { Calls.next += 1; return Calls.next }
  static func readWorseQueryIdentity(_ path:String)->(identifier:String?,readable:Bool,diagnostics:[String]) {
   Calls.events.append("identity:"+path)
-  return (Calls.identities[path],!Calls.unreadable.contains(path),[])
+  return (Calls.identities[path],!Calls.unreadable.contains(path),Calls.conflict ? ["identity=conflict"] : [])
  }
+'''
+        store = (ROOT / 'ThreeOneOSFive/helpers/ContainerStore.swift').read_text(encoding='utf-8')
+        code += extract_function(store, 'static func validateWorseQueryTransactionIdentity(')
+        code += '''
 }
+func MCMContainerPathForWorseQuery(_ cls:UInt64,_ id:String,_ group:Bool,_ error:UnsafeMutablePointer<NSString?>?)->String? {
+ Calls.events.append("mcm:"+id); return Calls.mcmPaths[id]
+}
+func containerPathForBundleID(_ id:String)->String? { Calls.events.append("ls:"+id); return Calls.lsPaths[id] }
+enum ContainerDiscoveryMerger { static func canonicalPath(_ path:String)->String { path } }
 enum IOS27ContainerSession { static func invalidate(bundleIDs:[String]) { Calls.invalidated += bundleIDs } }
-enum PatchPathValidator { static func canonicalFileURL(_ url:URL)->URL { url } }
+enum PatchPathValidator {
+ static func canonicalFileURL(_ url:URL)->URL { url }
+ static func canonicalBundleIdentifier(_ value:String)throws->String { value }
+}
 enum Service {
  static func execute(_ ids:[String]) throws {
   try withResolvedContainers(bundleIDs:ids) { _ in Calls.operationRan=true }

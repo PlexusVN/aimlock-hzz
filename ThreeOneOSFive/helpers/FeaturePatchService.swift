@@ -30,6 +30,7 @@ private struct CatalogRecoveryMetadata: Codable {
     let title: String
     let catalogIdentity: String
     var requestedEnabled: Bool? = nil
+    var requestedBinding: String? = nil
 }
 
 struct PatchCategory: Identifiable, Codable, Equatable {
@@ -423,6 +424,8 @@ final class FeaturePatchService: ObservableObject {
     private var pendingPatchOperations = 0
     private var requestedStateOverrides: [String: Bool] = [:]
     private var requestedProjectOverrides: [UUID: Bool] = [:]
+    private var requestedStateBindings: [String: String] = [:]
+    private var requestedProjectBindings: [UUID: String] = [:]
     private var catalogSyncRevision: UInt64 = 0
     private var nativeSessionToken = ""
     private var nativeSessionExpiresAt: Date?
@@ -981,73 +984,162 @@ final class FeaturePatchService: ObservableObject {
     /// Requested UI state never owns actual ON/recovery state. Even when local
     /// persistence is temporarily unavailable, keep the in-memory OFF request
     /// visible while preserving every journal, association and backup.
+    /// A requested switch state belongs to one actual transaction. Prefer its
+    /// journal ID so repairing an auxiliary sidecar cannot undo an explicit OFF.
+    private func requestedBinding(projectID: UUID?) -> String {
+        guard let projectID else { return "unresolved" }
+        if let receipt = DevicePatchService.latestReceipt(projectID: projectID) {
+            return projectID.uuidString + ":journal:" + receipt.id.uuidString
+        }
+        let record = try? StorageEngineCoordinator.shared.applicationStore().read(projectID)
+        if let journalID = record?.journalID {
+            return projectID.uuidString + ":journal:" + journalID.uuidString
+        }
+        return projectID.uuidString + ":operation:" + (record?.operationID.uuidString ?? "unknown-operation")
+    }
+
+    private func requestedCatalogProjectID(_ identity: String) -> UUID? {
+        if let active = try? activeCatalogProjectIDs(for: identity), active.count == 1 {
+            return active.first
+        }
+        return catalogApplications.projectID(for: identity)
+    }
+
     private func setRequestedEnabled(_ enabled: Bool, identity: String) {
+        let projectID = requestedCatalogProjectID(identity)
+        let binding = requestedBinding(projectID: projectID)
         requestedStateOverrides[identity] = enabled
+        requestedStateBindings[identity] = binding
         defaults.set(enabled, forKey: "patch_requested_enabled_" + identity)
-        if let projectID = catalogApplications.projectID(for: identity) {
+        defaults.set(binding, forKey: "patch_requested_binding_" + identity)
+        if let projectID {
             requestedProjectOverrides[projectID] = enabled
+            requestedProjectBindings[projectID] = binding
             defaults.set(enabled, forKey: "patch_requested_project_" + projectID.uuidString)
+            defaults.set(binding, forKey: "patch_requested_project_binding_" + projectID.uuidString)
         }
         do {
             var rows = try readRecoveryMetadata()
             for index in rows.indices where rows[index].catalogIdentity == identity {
+                // A catalog identity can retain old terminal transactions. Each
+                // row is bound to its own journal, never to another row's receipt.
+                let rowID = rows[index].projectID
+                let rowBinding = requestedBinding(projectID: rowID)
                 rows[index].requestedEnabled = enabled
-                requestedProjectOverrides[rows[index].projectID] = enabled
-                defaults.set(enabled, forKey: "patch_requested_project_" + rows[index].projectID.uuidString)
+                rows[index].requestedBinding = rowBinding
+                requestedProjectOverrides[rowID] = enabled
+                requestedProjectBindings[rowID] = rowBinding
+                defaults.set(enabled, forKey: "patch_requested_project_" + rowID.uuidString)
+                defaults.set(rowBinding, forKey: "patch_requested_project_binding_" + rowID.uuidString)
             }
             if !rows.isEmpty { try writeRecoveryMetadata(rows) }
         } catch {
-            // Metadata is a presentation aid. Never replace a damaged file or
-            // clear recovery evidence just to make the switch appear OFF.
+            // Presentation persistence may fail while locked. Keep the bound
+            // in-memory request, without replacing any damaged recovery file.
         }
         applicationRevision &+= 1
         refreshRecoveryItems()
     }
 
     private func setProjectRequestedEnabled(_ enabled: Bool, projectID: UUID) {
+        let binding = requestedBinding(projectID: projectID)
         requestedProjectOverrides[projectID] = enabled
+        requestedProjectBindings[projectID] = binding
         defaults.set(enabled, forKey: "patch_requested_project_" + projectID.uuidString)
-        var identities = Set<String>()
-        for (key, value) in defaults.dictionaryRepresentation()
-            where key.hasPrefix("patch_applied_") && key.hasSuffix("_projectID") &&
-                  (value as? String).flatMap(UUID.init(uuidString:)) == projectID {
-            identities.insert(String(key.dropFirst("patch_applied_".count).dropLast("_projectID".count)))
-        }
-        if let rows = try? readRecoveryMetadata() {
-            for row in rows where row.projectID == projectID { identities.insert(row.catalogIdentity) }
-        }
-        for identity in identities { setRequestedEnabled(enabled, identity: identity) }
+        defaults.set(binding, forKey: "patch_requested_project_binding_" + projectID.uuidString)
+        do {
+            var rows = try readRecoveryMetadata()
+            for index in rows.indices where rows[index].projectID == projectID {
+                rows[index].requestedEnabled = enabled
+                rows[index].requestedBinding = binding
+                let identity = rows[index].catalogIdentity
+                if requestedCatalogProjectID(identity) == projectID {
+                    requestedStateOverrides[identity] = enabled
+                    requestedStateBindings[identity] = binding
+                    defaults.set(enabled, forKey: "patch_requested_enabled_" + identity)
+                    defaults.set(binding, forKey: "patch_requested_binding_" + identity)
+                }
+            }
+            if !rows.isEmpty { try writeRecoveryMetadata(rows) }
+        } catch { }
         applicationRevision &+= 1
         refreshRecoveryItems()
+    }
+
+    /// Build-39/40 preferences had no transaction binding. Adopt them once for
+    /// the currently known transaction; later transactions cannot inherit them.
+    private func migrateRequestedBinding(projectID: UUID, identity: String?, binding: String) {
+        let projectKey = projectID.uuidString
+        if requestedProjectOverrides[projectID] != nil, requestedProjectBindings[projectID] == nil {
+            requestedProjectBindings[projectID] = binding
+        }
+        if defaults.object(forKey: "patch_requested_project_" + projectKey) != nil,
+           defaults.string(forKey: "patch_requested_project_binding_" + projectKey) == nil {
+            defaults.set(binding, forKey: "patch_requested_project_binding_" + projectKey)
+        }
+        if let identity {
+            if requestedStateOverrides[identity] != nil, requestedStateBindings[identity] == nil {
+                requestedStateBindings[identity] = binding
+            }
+            if defaults.object(forKey: "patch_requested_enabled_" + identity) != nil,
+               defaults.string(forKey: "patch_requested_binding_" + identity) == nil {
+                defaults.set(binding, forKey: "patch_requested_binding_" + identity)
+            }
+        }
+        do {
+            var rows = try readRecoveryMetadata()
+            var changed = false
+            for index in rows.indices where rows[index].projectID == projectID && rows[index].requestedBinding == nil && rows[index].requestedEnabled != nil {
+                rows[index].requestedBinding = binding
+                changed = true
+            }
+            if changed { try writeRecoveryMetadata(rows) }
+        } catch { }
+    }
+
+    private func requestedStateValue(projectID: UUID, identity: String?, metadata: CatalogRecoveryMetadata?) -> Bool? {
+        let binding = requestedBinding(projectID: projectID)
+        // If a bound metadata row survived preference loss, it also tells us
+        // which transaction any legacy preference originally described.
+        let legacyBinding = metadata?.requestedBinding ?? binding
+        var candidates: [(Bool?, String?)] = [
+            (requestedProjectOverrides[projectID], requestedProjectBindings[projectID]),
+            (defaults.object(forKey: "patch_requested_project_" + projectID.uuidString) as? Bool,
+             defaults.string(forKey: "patch_requested_project_binding_" + projectID.uuidString))
+        ]
+        if let identity {
+            candidates.append((requestedStateOverrides[identity], requestedStateBindings[identity]))
+            candidates.append((defaults.object(forKey: "patch_requested_enabled_" + identity) as? Bool,
+                               defaults.string(forKey: "patch_requested_binding_" + identity)))
+        }
+        candidates.append((metadata?.requestedEnabled, metadata?.requestedBinding))
+        for (value, storedBinding) in candidates {
+            guard let value, (storedBinding ?? legacyBinding) == binding else { continue }
+            if storedBinding == nil {
+                migrateRequestedBinding(projectID: projectID, identity: identity, binding: legacyBinding)
+            }
+            return value
+        }
+        return nil
     }
 
     func isPatchEnabled(_ patch: PatchItem) -> Bool {
         let identity = patchStorageSlug(patch)
         guard patchApplicationState(patch) == .applied else { return false }
-        if let requested = requestedStateOverrides[identity] { return requested }
-        if let requested = defaults.object(forKey: "patch_requested_enabled_" + identity) as? Bool { return requested }
         do {
             let activeIDs = try activeCatalogProjectIDs(for: identity)
             guard activeIDs.count == 1, let projectID = activeIDs.first else { return false }
-            if let requested = requestedProjectOverrides[projectID] { return requested }
-            if let requested = defaults.object(forKey: "patch_requested_project_" + projectID.uuidString) as? Bool { return requested }
-            let values = try readRecoveryMetadata().filter {
+            let metadata = try readRecoveryMetadata().first {
                 $0.catalogIdentity == identity && $0.projectID == projectID
-            }.compactMap(\.requestedEnabled)
-            return values.contains(false) ? false : true // Existing applied history migrates to ON.
+            }
+            return requestedStateValue(projectID: projectID, identity: identity, metadata: metadata) ?? true
         } catch { return false }
     }
 
     private func requestedEnabled(projectID: UUID, metadata: CatalogRecoveryMetadata?, state: PatchApplicationState) -> Bool {
         guard state == .applied else { return false }
-        if let requested = requestedProjectOverrides[projectID] { return requested }
-        if let requested = defaults.object(forKey: "patch_requested_project_" + projectID.uuidString) as? Bool { return requested }
-        if let metadata {
-            if let requested = requestedStateOverrides[metadata.catalogIdentity] { return requested }
-            if let requested = defaults.object(forKey: "patch_requested_enabled_" + metadata.catalogIdentity) as? Bool { return requested }
-            return metadata.requestedEnabled ?? true
-        }
-        return false // Unidentified historical recovery is not a user ON request.
+        return requestedStateValue(projectID: projectID, identity: metadata?.catalogIdentity, metadata: metadata)
+            ?? (metadata != nil) // Unidentified history is not a user ON request.
     }
 
     private func endPatchOperation() {
@@ -1082,8 +1174,10 @@ final class FeaturePatchService: ObservableObject {
         let safeTitle = String(String.UnicodeScalarView(title.unicodeScalars.filter {
             !CharacterSet.controlCharacters.contains($0)
         }.prefix(160)))
+        let binding = requestedBinding(projectID: projectID)
+        let value = requestedStateValue(projectID: projectID, identity: identity, metadata: nil)
         rows.append(CatalogRecoveryMetadata(projectID: projectID, title: safeTitle, catalogIdentity: identity,
-            requestedEnabled: requestedStateOverrides[identity] ?? defaults.object(forKey: "patch_requested_enabled_" + identity) as? Bool))
+            requestedEnabled: value, requestedBinding: value == nil ? nil : binding))
         try writeRecoveryMetadata(rows)
     }
 
@@ -1308,7 +1402,7 @@ final class FeaturePatchService: ObservableObject {
 
     private func ensureNativeSession(auth: AuthManager, force: Bool = false) async throws {
         guard auth.authState == .verified, !auth.licenseKey.isEmpty else {
-            throw NovaXControlError.message("Vui lòng đăng nhập Astra trước")
+            throw NovaXControlError.message("Vui lòng đăng nhập Aimlock Hzz trước")
         }
         if !force,
            !nativeSessionToken.isEmpty,
@@ -1337,7 +1431,7 @@ final class FeaturePatchService: ObservableObject {
             throw NovaXControlError.message("Phản hồi đăng nhập phiên không hợp lệ")
         }
         guard (200..<300).contains(http.statusCode), json["success"] as? Bool == true else {
-            throw NovaXControlError.message(serverMessage(from: data, fallback: "Không thể tạo phiên Astra"))
+            throw NovaXControlError.message(serverMessage(from: data, fallback: "Không thể tạo phiên Aimlock Hzz"))
         }
 
         let code = json["code"] as? String ?? ""
@@ -1351,7 +1445,7 @@ final class FeaturePatchService: ObservableObject {
         let message = "true|\(code)|\(responseKey)|\(type)|\(expiresAt)|\(sessionToken)|\(sessionExpires)|\(serverTime)"
         let expectedHMAC = HMACUtils.compute(key: novaProductSecret, message: message)
         guard !sessionToken.isEmpty, !receivedHMAC.isEmpty, receivedHMAC == expectedHMAC else {
-            throw NovaXControlError.message("Chữ ký phiên Astra không hợp lệ")
+            throw NovaXControlError.message("Chữ ký phiên Aimlock Hzz không hợp lệ")
         }
 
         nativeSessionToken = sessionToken
@@ -1817,7 +1911,7 @@ final class FeaturePatchService: ObservableObject {
         guard !isNativeInjecting else { throw NovaXControlError.message("Đang có thao tác ghi dữ liệu. Vui lòng chờ.") }
         guard auth.authState == .verified else { throw FeaturePatchError.notAuthenticated }
         guard ExploitSupportPolicy.currentStorageMode != .unsupported else {
-            throw NovaXControlError.message("Phiên bản iOS này không nằm trong danh sách hỗ trợ ghi file của Astra.")
+            throw NovaXControlError.message("Phiên bản iOS này không nằm trong danh sách hỗ trợ ghi file của Aimlock Hzz.")
         }
         let authRevision = auth.authenticationRevision
         isNativeInjecting = true

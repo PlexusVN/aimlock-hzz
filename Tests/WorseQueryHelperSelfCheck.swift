@@ -112,7 +112,7 @@ enum FixtureFailure: Error { case operation }
                      "readable but unwritable group remained cached after all probes failed")
         NativeFixture.preflightReady = true
         _ = try WorseQueryHelper.preparationDiagnostics()
-        NativeFixture.result = -4
+        NativeFixture.result = -9
         do {
             _ = try WorseQueryHelper.acquireAccess(for: root)
             preconditionFailure("symlink failure was swallowed")
@@ -131,6 +131,21 @@ enum FixtureFailure: Error { case operation }
         precondition(!WorseQueryHelper.isScopeSupported(for: "/var/mobile/Containers/Data/ApplicationFake/a"))
         precondition(!WorseQueryHelper.isScopeSupported(for: "/etc/passwd"))
 
+        let identifier = "00000000-0000-0000-0000-000000000002"
+        for major in [26, 27] {
+            ProcessInfo.processInfo.operatingSystemVersion = OperatingSystemVersion(majorVersion: major, minorVersion: major == 26 ? 6 : 0, patchVersion: major == 26 ? 2 : 1)
+            for family in ["/var/mobile/Containers/Data/Application", "/var/mobile/Containers/Data/InternalDaemon", "/var/mobile/Containers/Data/PluginKitPlugin"] {
+                precondition(!WorseQueryHelper.isScopeSupported(for: family), "container parent accepted")
+                precondition(!WorseQueryHelper.isScopeSupported(for: family + "/invalid-container/Documents"), "non-UUID container accepted")
+                precondition(WorseQueryHelper.isScopeSupported(for: family + "/" + identifier + "/Documents"))
+            }
+            precondition(WorseQueryHelper.isScopeSupported(for: "/var/mobile/Containers/Shared/AppGroup") == (major == 27))
+            precondition(WorseQueryHelper.isScopeSupported(for: "/var/containers/Data/System") == (major == 27))
+            precondition(WorseQueryHelper.isScopeSupported(for: "/var/containers/Data/System/" + identifier) == (major == 27))
+            precondition(WorseQueryHelper.isScopeSupported(for: "/var/containers/Shared/SystemGroup/" + identifier) == (major == 27))
+            precondition(!WorseQueryHelper.isScopeSupported(for: "/var/containers/Shared/SystemGroup"))
+        }
+        ProcessInfo.processInfo.operatingSystemVersion = OperatingSystemVersion(majorVersion: 27, minorVersion: 0, patchVersion: 1)
         let value = try WorseQueryHelper.withSandboxAccess(for: root + "/Documents/a") {
             precondition(NativeFixture.released.isEmpty)
             precondition(NativeFixture.calls.last!.0 == canonicalRoot)
@@ -167,7 +182,7 @@ enum FixtureFailure: Error { case operation }
         WorseQueryHelper.invalidateActiveAppGroup()
         NativeFixture.result = 43
         ProcessInfo.processInfo.operatingSystemVersion = OperatingSystemVersion(majorVersion: 26, minorVersion: 6, patchVersion: 2)
-        let handle = try WorseQueryHelper.acquireAccess(for: "/var/mobile/Containers/Shared/AppGroup/test")
+        let handle = try WorseQueryHelper.acquireAccess(for: "/var/mobile/Containers/Shared/AppGroup/00000000-0000-0000-0000-000000000002")
         precondition(NativeFixture.calls.last!.2)
         WorseQueryHelper.releaseAccess(handle: handle)
         print("[PASS] production worse_query helper: rewritten signed group, scope boundaries, root grant, flags, success/error release, daemon errors, missing group")

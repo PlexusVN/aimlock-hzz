@@ -47,11 +47,14 @@ enum DiscoveryFixture {
     static var next: Int64 = 1
     static var calls = 0, legacyCalls = 0
     static var reject = false, noMatch = false, setupError = false, missingGroup = false, cancel = false
+    static var mcmPaths: [String:String] = [:], lsPaths: [String:String] = [:], lookupCalls: [String] = []
+    static var identityUnavailable = false
     static var ranOnMain = false
     static var preflightFailed = false, localLinkFailed = false, readDenied = false
     static var onlyFirst = false, duplicateFirst = false, noCandidates = false, replaceGame = false, identityReads = 0
     static func reset(clearCache: Bool = true) {
         ranges = []; active = [:]; next = 1; calls = 0; legacyCalls = 0
+        mcmPaths = [:]; lsPaths = [:]; lookupCalls = []; identityUnavailable = false
         reject = false; noMatch = false; setupError = false; missingGroup = false; cancel = false; ranOnMain = false
         preflightFailed = false; localLinkFailed = false; readDenied = false; onlyFirst = false; duplicateFirst = false; noCandidates = false; replaceGame = false; identityReads = 0
         if clearCache { UserDefaults.standard.removePersistentDomain(forName: UserDefaults.suite) }
@@ -98,9 +101,20 @@ enum WorseQueryHelper {
     }
     static func releaseAccess(handle: Int64) { DiscoveryFixture.active.removeValue(forKey: handle) }
 }
+func MCMContainerPathForWorseQuery(_ cls: UInt64, _ identifier: String, _ group: Bool, _ error: UnsafeMutablePointer<NSString?>?) -> String? {
+    precondition(!Thread.isMainThread && cls == 2 && !group)
+    DiscoveryFixture.lookupCalls.append("mcm:" + identifier)
+    return DiscoveryFixture.mcmPaths[identifier]
+}
+func containerPathForBundleID(_ identifier: String) -> String? {
+    precondition(!Thread.isMainThread)
+    DiscoveryFixture.lookupCalls.append("ls:" + identifier)
+    return DiscoveryFixture.lsPaths[identifier]
+}
 func getxattr(_ path: String, _ name: String, _ value: UnsafeMutableRawPointer?, _ size: Int, _ position: UInt32, _ options: Int32) -> Int {
     precondition(DiscoveryFixture.active.values.contains(path), "read identifier before consuming this UUID's token")
     DiscoveryFixture.identityReads += 1
+    if DiscoveryFixture.identityUnavailable { return -1 }
     let identifier = DiscoveryFixture.noMatch ? "com.fixture.other" : (DiscoveryFixture.duplicateFirst && path == DiscoveryFixture.other) ? DiscoveryFixture.gameID : (path == DiscoveryFixture.game || path == DiscoveryFixture.replacementGame) ? DiscoveryFixture.gameID : path == DiscoveryFixture.max ? DiscoveryFixture.maxID : "com.fixture.other"
     let bytes = Array(identifier.utf8) + [0]
     if value == nil { return bytes.count - 1 }
@@ -294,11 +308,51 @@ final class RestartFlag: @unchecked Sendable {
         precondition(interruptedGate.state == .failed && !restarted.value && !interruptedGate.didContinue)
         await interruptedGate.prepareIfNeeded(force: true)
         precondition(interruptedGate.state == .ready && restarted.value && !interruptedGate.didContinue)
+        // Reference WQ02 regression: exact identifier lookup establishes path
+        // identity even when xattr/metadata cannot be read, after a fresh grant.
+        preparation.reset(); DiscoveryFixture.reset(); DiscoveryFixture.identityUnavailable = true
+        DiscoveryFixture.mcmPaths[DiscoveryFixture.gameID] = DiscoveryFixture.game
+        let lookupRoot = try await targetScan([DiscoveryFixture.gameID])
+        precondition(lookupRoot[DiscoveryFixture.gameID] == DiscoveryFixture.game && DiscoveryFixture.ranges.isEmpty)
+        precondition(DiscoveryFixture.calls == 1 && DiscoveryFixture.active.isEmpty)
+        precondition(DiscoveryFixture.progress.shareText.contains("source=mcm_bundle_id"))
+
+        DiscoveryFixture.reset(); DiscoveryFixture.identityUnavailable = true
+        DiscoveryFixture.lsPaths[DiscoveryFixture.gameID] = DiscoveryFixture.game
+        let lsRoot = try await targetScan([DiscoveryFixture.gameID])
+        precondition(lsRoot[DiscoveryFixture.gameID] == DiscoveryFixture.game && DiscoveryFixture.ranges.isEmpty)
+        precondition(DiscoveryFixture.lookupCalls == ["mcm:"+DiscoveryFixture.gameID, "ls:"+DiscoveryFixture.gameID])
+
+        DiscoveryFixture.reset(); DiscoveryFixture.identityUnavailable = true
+        UserDefaults.standard.set(DiscoveryFixture.game, forKey: "astra.resolved_container."+DiscoveryFixture.gameID)
+        do { _ = try await targetScan([DiscoveryFixture.gameID]); preconditionFailure("anonymous remembered UUID accepted without identity or system binding") }
+        catch WorseQueryError.containerDiscoveryFailed {}
+        precondition(DiscoveryFixture.ranges.last?.1 == 2_100_000 && DiscoveryFixture.active.isEmpty)
+
+        DiscoveryFixture.reset(); DiscoveryFixture.noMatch = true
+        DiscoveryFixture.mcmPaths[DiscoveryFixture.gameID] = DiscoveryFixture.game
+        do { _ = try await targetScan([DiscoveryFixture.gameID]); preconditionFailure("conflicting readable identity accepted for exact lookup") }
+        catch WorseQueryError.containerDiscoveryFailed {}
+        precondition(DiscoveryFixture.progress.shareText.contains("lookup conflict"))
+
+        DiscoveryFixture.reset(); DiscoveryFixture.identityUnavailable = true
+        DiscoveryFixture.mcmPaths[DiscoveryFixture.gameID] = DiscoveryFixture.game
+        DiscoveryFixture.mcmPaths[DiscoveryFixture.maxID] = DiscoveryFixture.game
+        do { _ = try await targetScan([DiscoveryFixture.gameID, DiscoveryFixture.maxID]); preconditionFailure("one UUID claimed by two exact identifiers") }
+        catch WorseQueryError.containerDiscoveryFailed {}
+        precondition(DiscoveryFixture.active.isEmpty)
+
+        DiscoveryFixture.reset(); DiscoveryFixture.identityUnavailable = true; DiscoveryFixture.readDenied = true
+        DiscoveryFixture.mcmPaths[DiscoveryFixture.gameID] = DiscoveryFixture.game
+        do { _ = try await targetScan([DiscoveryFixture.gameID]); preconditionFailure("system path accepted before a readable granted directory") }
+        catch WorseQueryError.containerDiscoveryFailed {}
+        precondition(DiscoveryFixture.active.isEmpty)
+
         preparation.reset(); DiscoveryFixture.reset()
         preparation.configureTargets(bundleIDs: [])
         await preparation.prepareIfNeeded(force: true); await drain()
         precondition(preparation.state == .ready && DiscoveryFixture.ranges.last!.1 == 2_100_000,
                      "general readiness must accept an empty game capability list")
-        print("[PASS] actual general readiness and lazy target preparation: \(AppInfo.versionTuple.major).\(AppInfo.versionTuple.minor).\(AppInfo.versionTuple.patch), high inodes, both games, cache revalidation, no legacy MCM/LS, per-UUID tokens, off-main, missing group, failure/cancel blocks entry and patch")
+        print("[PASS] actual general readiness and lazy target preparation: \(AppInfo.versionTuple.major).\(AppInfo.versionTuple.minor).\(AppInfo.versionTuple.patch), high inodes, both games, cache revalidation, no legacy activation; exact Bundle-ID lookup/read evidence, per-UUID tokens, off-main, missing group, failure/cancel blocks entry and patch")
     }
 }

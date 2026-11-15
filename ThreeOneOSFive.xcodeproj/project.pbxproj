@@ -103,7 +103,7 @@
 		A57A00000000000000000022 /* ProtectedReleaseLease.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProtectedReleaseLease.swift; sourceTree = "<group>"; };
 		A57A00000000000000000012 /* DeviceEnvironmentInspector.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DeviceEnvironmentInspector.swift; sourceTree = "<group>"; };
 		A57A0000000000000000000A /* AppSecurityConfiguration.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppSecurityConfiguration.swift; sourceTree = "<group>"; };
-		3105A010 /* Astra.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = "Astra.app"; sourceTree = BUILT_PRODUCTS_DIR; };
+		3105A010 /* AimlockHzz.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = "AimlockHzz.app"; sourceTree = BUILT_PRODUCTS_DIR; };
 		3105A020 /* App.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = App.swift; sourceTree = "<group>"; };
 		3105A021 /* ContentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContentView.swift; sourceTree = "<group>"; };
 		3105A023 /* SettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsView.swift; sourceTree = "<group>"; };
@@ -407,7 +407,7 @@
 			dependencies = (
 			);
 			name = 3105;
-			productName = Astra;
+			productName = AimlockHzz;
 			productReference = 3105A010;
 			productType = "com.apple.product-type.application";
 		};
@@ -585,7 +585,7 @@
 				CLANG_CXX_LANGUAGE_STANDARD = "gnu++20";
 				CODE_SIGN_ENTITLEMENTS = ThreeOneOSFive/ThreeOneOSFive.entitlements;
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 40;
+				CURRENT_PROJECT_VERSION = 41;
 				ENABLE_USER_SCRIPT_SANDBOXING = NO;
 				GCC_C_LANGUAGE_STANDARD = gnu17;
 				GENERATE_INFOPLIST_FILE = YES;
@@ -605,7 +605,7 @@
 				MARKETING_VERSION = 2.4;
 				OTHER_LDFLAGS = "-lz -lc++";
 				PRODUCT_BUNDLE_IDENTIFIER = "com.apple.mobile.MobileHouseArrest";
-				PRODUCT_NAME = Astra;
+				PRODUCT_NAME = AimlockHzz;
 				SWIFT_EMIT_LOC_STRINGS = YES;
 				SWIFT_OBJC_BRIDGING_HEADER = "ThreeOneOSFive/ThreeOneOSFive-Bridging-Header.h";
 				SWIFT_VERSION = 5.0;
@@ -620,7 +620,7 @@
 				CLANG_CXX_LANGUAGE_STANDARD = "gnu++20";
 				CODE_SIGN_ENTITLEMENTS = ThreeOneOSFive/ThreeOneOSFive.entitlements;
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 40;
+				CURRENT_PROJECT_VERSION = 41;
 				ENABLE_USER_SCRIPT_SANDBOXING = NO;
 				GCC_C_LANGUAGE_STANDARD = gnu17;
 				GENERATE_INFOPLIST_FILE = YES;
@@ -640,7 +640,7 @@
 				MARKETING_VERSION = 2.4;
 				OTHER_LDFLAGS = "-lz -lc++";
 				PRODUCT_BUNDLE_IDENTIFIER = "com.apple.mobile.MobileHouseArrest";
-				PRODUCT_NAME = Astra;
+				PRODUCT_NAME = AimlockHzz;
 				SWIFT_EMIT_LOC_STRINGS = YES;
 				SWIFT_OBJC_BRIDGING_HEADER = "ThreeOneOSFive/ThreeOneOSFive-Bridging-Header.h";
 				SWIFT_VERSION = 5.0;

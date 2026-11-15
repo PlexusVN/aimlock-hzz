@@ -498,7 +498,7 @@ enum StableDeviceHWID {
             switch identity {
             case .keychain(let status):
                 if status == -34018 {
-                    return "Bản ký Astra không có quyền truy cập Keychain. Hãy kiểm tra profile và quyền Keychain khi ký lại (HW02; OSStatus \(status))."
+                    return "Bản ký Aimlock Hzz không có quyền truy cập Keychain. Hãy kiểm tra profile và quyền Keychain khi ký lại (HW02; OSStatus \(status))."
                 }
                 if !protectedDataAvailable {
                     return "Dữ liệu bảo mật chưa sẵn sàng. Hãy mở khóa iPhone rồi thử lại (HW01; OSStatus \(status))."
@@ -506,12 +506,12 @@ enum StableDeviceHWID {
                 return "Keychain từ chối truy cập định danh thiết bị. Hãy thử lại; nếu vẫn lỗi, gửi mã này để kiểm tra bản ký (HW03; OSStatus \(status))."
             case .identityMissing:
                 return protectedDataAvailable
-                    ? "iOS chưa trả về định danh thiết bị. Astra sẽ tự đọc lại khi ứng dụng hoạt động; hãy thử lại sau giây lát (HW04)."
+                    ? "iOS chưa trả về định danh thiết bị. Aimlock Hzz sẽ tự đọc lại khi ứng dụng hoạt động; hãy thử lại sau giây lát (HW04)."
                     : "Định danh thiết bị chưa sẵn sàng. Hãy mở khóa iPhone rồi thử lại (HW01)."
             case .invalidIdentity:
-                return "Không còn bản lưu HWID có UUID hợp lệ để khôi phục. Astra giữ nguyên dữ liệu và không tạo HWID mới; hãy sao chép thông tin lỗi để được kiểm tra (HW05-DATA)."
+                return "Không còn bản lưu HWID có UUID hợp lệ để khôi phục. Aimlock Hzz giữ nguyên dữ liệu và không tạo HWID mới; hãy sao chép thông tin lỗi để được kiểm tra (HW05-DATA)."
             case .ambiguousIdentity:
-                return "Hai bản lưu HWID chứa hai UUID khác nhau. Astra giữ nguyên cả hai và không tự chọn thiết bị; hãy sao chép thông tin lỗi để được kiểm tra (HW05-CONFLICT)."
+                return "Hai bản lưu HWID chứa hai UUID khác nhau. Aimlock Hzz giữ nguyên cả hai và không tự chọn thiết bị; hãy sao chép thông tin lỗi để được kiểm tra (HW05-CONFLICT)."
             case .invalidInput: break
             }
         }

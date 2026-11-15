@@ -87,7 +87,7 @@ struct AirLiftDashboardCard: View {
                 Task { await pairingManager.pairDirectlyOnDevice() }
             }
         } message: {
-            Text("Astra sẽ chạy RPPairing host thật và phát Bonjour. Sau đó mở Cài đặt › Quyền riêng tư & Bảo mật › Chế độ nhà phát triển, chọn Pair with Astra và nhập PIN hiển thị trong ứng dụng.")
+            Text("Aimlock Hzz sẽ chạy RPPairing host thật và phát Bonjour. Sau đó mở Cài đặt › Quyền riêng tư & Bảo mật › Chế độ nhà phát triển, chọn Pair with Aimlock Hzz và nhập PIN hiển thị trong ứng dụng.")
         }
         .task {
             if storageCoordinator.isAirLiftActive {
@@ -278,7 +278,7 @@ struct AirLiftDashboardCard: View {
                     Spacer()
                 }
                 if pairingManager.canRetryBonjourAdvertisement {
-                    Button("Phát lại thiết bị Astra") {
+                    Button("Phát lại thiết bị Aimlock Hzz") {
                         pairingManager.retryBonjourAdvertisement(userInitiated: true)
                     }
                     .font(.system(size: 10, weight: .bold))
@@ -356,7 +356,7 @@ struct AirLiftDashboardCard: View {
                     Text("LƯU Ý: CHƯA KẾT NỐI WI-FI")
                         .font(.system(size: 10, weight: .black, design: .monospaced))
                         .foregroundColor(AppTheme.statusError)
-                    Text("Apple chỉ hiển thị 'Pair with Astra' khi iPhone đang bật Wi-Fi (hoặc Điểm phát sóng). Nếu dùng 4G, vui lòng bật Wi-Fi.")
+                    Text("Apple chỉ hiển thị 'Pair with Aimlock Hzz' khi iPhone đang bật Wi-Fi (hoặc Điểm phát sóng). Nếu dùng 4G, vui lòng bật Wi-Fi.")
                         .font(.system(size: 9))
                         .foregroundColor(AppTheme.grey700)
                 }
@@ -378,7 +378,7 @@ struct AirLiftDashboardCard: View {
                 .foregroundColor(AppTheme.statusInfo)
             Text("1. Đảm bảo iPhone đã bật Wi-Fi (hoặc Điểm phát sóng).")
             Text("2. Mở Cài đặt ➔ Quyền riêng tư & Bảo mật ➔ Chế độ nhà phát triển.")
-            Text("3. Tại mục ghép đôi, chọn 'Pair with Astra'.")
+            Text("3. Tại mục ghép đôi, chọn 'Pair with Aimlock Hzz'.")
             Text("4. Nhập mật mã máy, sau đó nhập mã 6 số ở trên vào ô yêu cầu.")
         }
         .font(.system(size: 10))
@@ -412,7 +412,7 @@ struct AirLiftDashboardCard: View {
                     }
                 } label: {
                     Label(
-                        pairingManager.isPairingHostActive ? "Phát lại Astra" : "Pair trên máy",
+                        pairingManager.isPairingHostActive ? "Phát lại Aimlock Hzz" : "Pair trên máy",
                         systemImage: "iphone.and.arrow.forward"
                     )
                         .font(.system(size: 11, weight: .bold, design: .default))
@@ -864,7 +864,7 @@ struct AirLiftSettingsSection: View {
                             .foregroundStyle(AppTheme.statusInfo)
                             .frame(width: 24)
 
-                        Text(pairingManager.isPairingHostActive ? "Phát lại thiết bị Astra" : "Pair trực tiếp trên iPhone")
+                        Text(pairingManager.isPairingHostActive ? "Phát lại thiết bị Aimlock Hzz" : "Pair trực tiếp trên iPhone")
                             .foregroundStyle(AppTheme.statusInfo)
                     }
                 }
@@ -1383,7 +1383,7 @@ struct IOS27PairingSetupView: View {
                 Task { await pairingManager.pairDirectlyOnDevice() }
             }
         } message: {
-            Text("Mở Cài đặt › Quyền riêng tư & Bảo mật › Chế độ nhà phát triển, chọn ghép đôi với Astra rồi nhập mã PIN hiển thị.")
+            Text("Mở Cài đặt › Quyền riêng tư & Bảo mật › Chế độ nhà phát triển, chọn ghép đôi với Aimlock Hzz rồi nhập mã PIN hiển thị.")
         }
         .task {
             await runComprehensiveCheck()
@@ -1626,7 +1626,7 @@ struct IOS27PairingSetupView: View {
                     if ExploitSupportPolicy.currentPairingMode == .onDeviceOrImportedFile {
                         VStack(alignment: .leading, spacing: 4) {
                             Text("1. Mở Cài đặt › Quyền riêng tư & Bảo mật › Chế độ nhà phát triển.")
-                            Text("2. Chọn Astra trong danh sách ghép đôi.")
+                            Text("2. Chọn Aimlock Hzz trong danh sách ghép đôi.")
                             Text("3. Nhập mã PIN đang hiển thị.")
                         }
                         .font(.system(size: 11))
@@ -1666,7 +1666,7 @@ struct IOS27PairingSetupView: View {
                         }
                     } label: {
                         Label(
-                            pairingManager.isPairingHostActive ? "Phát lại Astra" : "Pair trên máy",
+                            pairingManager.isPairingHostActive ? "Phát lại Aimlock Hzz" : "Pair trên máy",
                             systemImage: "iphone.and.arrow.forward"
                         )
                         .font(.system(size: 12, weight: .bold))
@@ -1810,7 +1810,7 @@ struct IOS27PairingSetupView: View {
                 HStack(spacing: 8) {
                     Image(systemName: isReadyToProceed ? "arrow.right.circle.fill" : "lock.fill")
                         .font(.system(size: 16, weight: .bold))
-                    Text(isReadyToProceed ? "TIẾP TỤC VÀO ASTRA" : "HOÀN THÀNH 3 BƯỚC ĐỂ TIẾP TỤC")
+                    Text(isReadyToProceed ? "TIẾP TỤC VÀO AIMLOCK HZZ" : "HOÀN THÀNH 3 BƯỚC ĐỂ TIẾP TỤC")
                         .font(.system(size: 14, weight: .bold))
                         .tracking(0.3)
                 }

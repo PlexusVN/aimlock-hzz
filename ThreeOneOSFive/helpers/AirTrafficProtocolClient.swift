@@ -28,14 +28,14 @@ enum AirLiftError: Error, LocalizedError {
             return "Đường hầm LocalDevVPN chưa kết nối."
         case .pairingRequired:
             if ExploitSupportPolicy.currentPairingMode == .onDeviceOrImportedFile {
-                return "Chưa ghép đôi thiết bị với Astra. Hãy vào Cài đặt (bánh răng) › AIRLIFT › bấm 'Pair trên máy' trước khi kích hoạt cheat."
+                return "Chưa ghép đôi thiết bị với Aimlock Hzz. Hãy vào Cài đặt (bánh răng) › AIRLIFT › bấm 'Pair trên máy' trước khi kích hoạt cheat."
             }
             return "Chưa có pairing hợp lệ. Hãy tạo file pairing bằng máy tính, sau đó vào Cài đặt (bánh răng) › AIRLIFT › Nhập file pairing."
         case .pairingRevoked:
             if ExploitSupportPolicy.currentPairingMode == .onDeviceOrImportedFile {
-                return "Thiết bị iPhone đã hủy ghép đôi với Astra. Vui lòng vào Cài đặt › AIRLIFT › bấm 'Pair trên máy' để ghép đôi lại."
+                return "Thiết bị iPhone đã hủy ghép đôi với Aimlock Hzz. Vui lòng vào Cài đặt › AIRLIFT › bấm 'Pair trên máy' để ghép đôi lại."
             }
-            return "File pairing đã hết hiệu lực. Hãy tạo lại file pairing bằng máy tính rồi nhập file mới vào Astra."
+            return "File pairing đã hết hiệu lực. Hãy tạo lại file pairing bằng máy tính rồi nhập file mới vào Aimlock Hzz."
         case .invalidTargetPath:
             return "Đường dẫn đích không hợp lệ hoặc không phải đường dẫn tuyệt đối."
         case .socketConnectionFailed(let message):
@@ -47,7 +47,7 @@ enum AirLiftError: Error, LocalizedError {
         case .verificationFailed(let message):
             return "Không thể xác minh quyền ghi AirTraffic: \(message)"
         case .remoteReadUnsupported:
-            return "AirliftFFI hiện không cung cấp API đọc file tùy ý; Astra chỉ xác minh canary và kết quả phiên ghi."
+            return "AirliftFFI hiện không cung cấp API đọc file tùy ý; Aimlock Hzz chỉ xác minh canary và kết quả phiên ghi."
         case .executionFailed(let message):
             return "AirLift thất bại: \(message)"
         }
@@ -492,7 +492,7 @@ final class AirTrafficProtocolClient: ObservableObject {
         }
         if err.contains("rejected pairing keys") || err.contains("tunnelfailurepairverify") ||
            err.contains("pairing revoked") || err.contains("invalidpairing") {
-            return "Thiết bị iPhone đã từ chối hoặc hủy ghép đôi với Astra trong Cài đặt. Vui lòng ghép đôi lại."
+            return "Thiết bị iPhone đã từ chối hoặc hủy ghép đôi với Aimlock Hzz trong Cài đặt. Vui lòng ghép đôi lại."
         }
         if err.contains("quá thời gian") || err.contains("timed out") {
             return "Quá thời gian kết nối dịch vụ. Hãy kiểm tra LocalDevVPN đã bật rồi bấm kiểm tra lại."

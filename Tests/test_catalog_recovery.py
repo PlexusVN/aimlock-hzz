@@ -20,6 +20,8 @@ METHODS = [
     'private func recoveryMetadataURL(', 'private func readRecoveryMetadata(',
     'private func saveRecoveryMetadata(', 'func refreshRecoveryItems(',
     'private func writeRecoveryMetadata(', 'private func setRequestedEnabled(',
+    'private func requestedBinding(', 'private func requestedCatalogProjectID(',
+    'private func migrateRequestedBinding(', 'private func requestedStateValue(',
     'private func setProjectRequestedEnabled(', 'func isPatchEnabled(',
     'private func requestedEnabled(', 'func recordPatchOffFailure(', 'func recordRecoveryOffFailure(',
     'private func clearRestoredAssociations(', 'func isPatchApplied(',
@@ -35,6 +37,12 @@ def production_sources():
     code += transaction[transaction.index('struct PatchTransactionReceipt:'):transaction.index('enum PatchTransaction {')]
     code += extract_function(source, 'enum PatchRestoreError:') + '\n'
     code += (ROOT / 'Tests/CatalogRecoveryFixtures.swift').read_text(encoding='utf-8')
+    models = (ROOT / 'ThreeOneOSFive/helpers/PatchProjectModels.swift').read_text(encoding='utf-8')
+    code += extract_function(models, 'enum PatchPackageLimits {') + '\n'
+    code += 'enum PatchPathValidator {\n'
+    for signature in ['static func canonicalBundleIdentifier(', 'static func canonicalRelativePath(']:
+        code += extract_function(models, signature) + '\n'
+    code += '}\n'
     code += '''
 @MainActor final class FeaturePatchService {
 var defaults:UserDefaults { Fixture.defaults }
@@ -47,6 +55,8 @@ var patchOperationInProgress=false
 private var pendingPatchOperations=0
 private var requestedStateOverrides:[String:Bool]=[:]
 private var requestedProjectOverrides:[UUID:Bool]=[:]
+private var requestedStateBindings:[String:String]=[:]
+private var requestedProjectBindings:[UUID:String]=[:]
 func localPatchURL(_ patch:PatchItem)->URL { Fixture.root.appendingPathComponent("unused-legacy-download") }
 func downloadPatch(_ patch:PatchItem,auth:AuthManager)async throws->URL {
   Fixture.downloads += 1

@@ -1,4 +1,4 @@
-name: Astra Device Auth Recovery Checks
+name: Aimlock Hzz Device Auth Recovery Checks
 
 on:
   workflow_dispatch:

@@ -31,7 +31,7 @@ public enum WorseQueryError: LocalizedError {
     public var errorDescription: String? {
         switch self {
         case .appGroupUnavailable:
-            return "Bản ký Astra hiện tại không có App Group truy cập được nên chưa thể dùng worse_query không cần VPN/pairing. Hãy ký lại bằng profile có App Group hợp lệ và giữ quyền App Group khi ký ESign."
+            return "Bản ký Aimlock Hzz hiện tại không có App Group truy cập được nên chưa thể dùng worse_query không cần VPN/pairing. Hãy ký lại bằng profile có App Group hợp lệ và giữ quyền App Group khi ký ESign."
         case .targetNotFound(let path):
             return "Đường dẫn mục tiêu không tồn tại trên thiết bị: \(path)"
         case .dlopenOrSymbolsFailed:
@@ -51,7 +51,7 @@ public enum WorseQueryError: LocalizedError {
         case .containerDiscoveryFailed(let bundleID):
             return "Chưa xác minh được thư mục dữ liệu của \(bundleID) trong phạm vi dò hiện tại (WQ02). Xem nhật ký đọc định danh; kết quả này không chứng minh ứng dụng chưa được cài."
         case .discoveryInProgress:
-            return "Astra đang dò thư mục dữ liệu cho một thao tác khác. Hãy chờ thao tác đó hoàn tất rồi thử lại."
+            return "Aimlock Hzz đang dò thư mục dữ liệu cho một thao tác khác. Hãy chờ thao tác đó hoàn tất rồi thử lại."
         case .preparationRequired:
             return "Chưa chuẩn bị xong quyền truy cập ứng dụng. Hãy hoàn tất màn hình chuẩn bị trước khi bật chức năng."
         case .nativeException:
@@ -178,7 +178,7 @@ public final class WorseQueryHelper {
             reports.append("SELECTED writable_group=\(group)")
             return reports.joined(separator: "\n")
         }
-        reports.append("Không có App Group nào vượt qua kiểm tra ghi/symlink. Hãy ký lại Astra bằng profile cấp App Group tương ứng; chỉ thêm tên group vào IPA không tự cấp quyền truy cập.")
+        reports.append("Không có App Group nào vượt qua kiểm tra ghi/symlink. Hãy ký lại Aimlock Hzz bằng profile cấp App Group tương ứng; chỉ thêm tên group vào IPA không tự cấp quyền truy cập.")
         throw WorseQueryError.localFilesystemFailure(reports.joined(separator: "\n"))
     }
 
@@ -187,28 +187,44 @@ public final class WorseQueryHelper {
     /// Kiểm tra xem đường dẫn có thuộc phạm vi cho phép của worse_query hay không
     public static func isScopeSupported(for path: String) -> Bool {
         let clean = ContainerDiscoveryMerger.canonicalPath(path)
-        return supportedRoots.contains { clean == $0 || clean.hasPrefix($0 + "/") }
+        guard clean.hasPrefix("/private/var/") else { return false }
+        let major = ProcessInfo.processInfo.operatingSystemVersion.majorVersion
+        if major == 27 && parentGrantRoots.contains(clean) { return true }
+        return containerRoot(for: clean) != nil
     }
 
-    private static let supportedRoots = [
+    private static let commonContainerRoots = [
         "/var/mobile/Containers/Data/Application",
         "/var/mobile/Containers/Data/InternalDaemon",
         "/var/mobile/Containers/Data/PluginKitPlugin",
-        "/var/mobile/Containers/Shared/AppGroup",
-        "/var/containers/Data/System",
-        "/var/containers/Shared/SystemGroup"
+        "/var/mobile/Containers/Shared/AppGroup"
     ].map { ContainerDiscoveryMerger.canonicalPath($0) }
+
+    // Upstream grants the System parent and AppGroup parent on iOS 27 only.
+    private static let parentGrantRoots = [
+        "/var/containers/Data/System",
+        "/var/mobile/Containers/Shared/AppGroup"
+    ].map { ContainerDiscoveryMerger.canonicalPath($0) }
+
+    private static var supportedContainerRoots: [String] {
+        guard ProcessInfo.processInfo.operatingSystemVersion.majorVersion == 27 else {
+            return commonContainerRoots
+        }
+        return commonContainerRoots + [
+            "/var/containers/Data/System", "/var/containers/Shared/SystemGroup"
+        ].map { ContainerDiscoveryMerger.canonicalPath($0) }
+    }
 
     /// Trích xuất thư mục gốc của container từ đường dẫn bất kỳ (Data/Application, AppGroup, System)
     public static func containerRoot(for path: String) -> String? {
         let clean = ContainerDiscoveryMerger.canonicalPath(path)
-        let prefixes = supportedRoots.map { $0 + "/" }
+        let prefixes = supportedContainerRoots.map { $0 + "/" }
 
         for prefix in prefixes {
             if clean.hasPrefix(prefix) {
                 let remainder = String(clean.dropFirst(prefix.count))
                 let parts = remainder.split(separator: "/")
-                if let first = parts.first, !first.isEmpty {
+                if let first = parts.first, first.utf8.count == 36, UUID(uuidString: String(first)) != nil {
                     return prefix + String(first)
                 }
             }
@@ -289,7 +305,7 @@ public final class WorseQueryHelper {
             throw WorseQueryError.dlopenOrSymbolsFailed
         case -3:
             throw WorseQueryError.queryCreationFailed
-        case -4:
+        case -4, -9:
             throw WorseQueryError.localFilesystemFailure(nativeDiagnostics)
         case -5:
             throw WorseQueryError.queryRejected

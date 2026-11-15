@@ -1,3 +1,7 @@
+## Build 2.4 (41): Áp dụng luồng tham chiếu
+
+Ghép các sửa patch/restore từ source tham chiếu người dùng cung cấp: journal schema 3 có provenance bất biến, kiểm tra kích thước record đối xứng, final restore read-back, Bundle-ID lookup trước inode scan và kiểm bằng chứng target dưới grant mới. Giữ quét ban đầu không cần game, OFF lỗi vẫn OFF và không hiện lại khối recovery. Tên hiển thị/pairing cùng sản phẩm Xcode dùng Aimlock Hzz/AimlockHzz. Xem [phạm vi ghép source và tương thích](docs/ASTRA_REFERENCE_PORT_41.md).
+
 ## Build 2.4 (39): Bảo toàn patch và khôi phục
 
 Build 39 bổ sung lịch sử fail-closed, giữ association/backup active, confirmation restore gắn với snapshot dữ liệu, intent theo auth revision và danh sách recovery local độc lập catalog. Ghi target dùng directory descriptor đã giữ; probe direct hoàn tất trước auto-run native. Bảng OS và thứ tự 3105 → worse_query → AirLift không đổi. Xem [thiết kế, phạm vi và giới hạn kiểm chứng](docs/PATCH_RESTORE_FIX_39.md).
@@ -8,11 +12,11 @@ Build 39 bổ sung lịch sử fail-closed, giữ association/backup active, con
 
 ## Build 2.4 (37): Khôi phục định danh thiết bị
 
-Astra 2.4 (build 37) đóng gói bản sửa recovery sau cài lại/reset thiết bị: dùng lại khóa hợp lệ, hoàn tất recovery được admin cấp quyền và tiếp tục đúng bộ khóa đã lưu khi mất phản hồi đăng ký. Đồng bộ phiên bản trong Info.plist, hai cấu hình Xcode và artifact CI. Xem [phạm vi, kiểm thử và giới hạn triển khai](docs/IDENTITY_RECOVERY_FIX_20261112.md).
+Aimlock Hzz 2.4 (build 37) đóng gói bản sửa recovery sau cài lại/reset thiết bị: dùng lại khóa hợp lệ, hoàn tất recovery được admin cấp quyền và tiếp tục đúng bộ khóa đã lưu khi mất phản hồi đăng ký. Đồng bộ phiên bản trong Info.plist, hai cấu hình Xcode và artifact CI. Xem [phạm vi, kiểm thử và giới hạn triển khai](docs/IDENTITY_RECOVERY_FIX_20261112.md).
 
-## Build 2.3 (36): Nâng cấp phiên bản Astra 2.3
+## Build 2.3 (36): Nâng cấp phiên bản Aimlock Hzz 2.3
 
-Nâng cấp phiên bản chính thức lên Astra 2.3 (build 36). Đồng bộ toàn bộ các cập nhật định tuyến động cơ worse_query / 3105 / AirLift, tối ưu hóa lưu trữ định danh HWID và truy cập container game.
+Nâng cấp phiên bản chính thức lên Aimlock Hzz 2.3 (build 36). Đồng bộ toàn bộ các cập nhật định tuyến động cơ worse_query / 3105 / AirLift, tối ưu hóa lưu trữ định danh HWID và truy cập container game.
 
 ## Build 2.2 (35): HWID trước đăng nhập
 
@@ -20,22 +24,22 @@ Nâng cấp phiên bản chính thức lên Astra 2.3 (build 36). Đồng bộ t
 
 ## Cập nhật 2.2 (34): định tuyến engine theo upstream
 
-3105 được ưu tiên cho toàn bộ phạm vi upstream, cộng nhánh iOS 16 của Astra. Worse_query chỉ dùng từ 26.6.2 trong phạm vi được hỗ trợ, trừ các build 27 beta đã thuộc 3105. Các bản 18.x/26.x còn lại dùng AirLift + file pairing. Không tự đổi engine theo App Group. Xem [bảng và giới hạn kiểm chứng](docs/ENGINE_ROUTING_ASTRA_2_2.md).
+3105 được ưu tiên cho toàn bộ phạm vi upstream, cộng nhánh iOS 16 của Aimlock Hzz. Worse_query chỉ dùng từ 26.6.2 trong phạm vi được hỗ trợ, trừ các build 27 beta đã thuộc 3105. Các bản 18.x/26.x còn lại dùng AirLift + file pairing. Không tự đổi engine theo App Group. Xem [bảng và giới hạn kiểm chứng](docs/ENGINE_ROUTING_ASTRA_2_2.md).
 
-# Astra — trạng thái tích hợp on-device AirLift
+# Aimlock Hzz — trạng thái tích hợp on-device AirLift
 
 > Cập nhật 11/11/2026: source hiện ưu tiên worse_query khi OS và App Group cho
 > phép. Phần dưới mô tả luồng AirLift dự phòng. Xem
 > [rà soát worse_query/P06](docs/WORSE_QUERY_AUDIT_20261111.md) để biết các lỗi
 > tích hợp đã sửa, yêu cầu bản ký và giới hạn kiểm chứng máy thật.
 
-Astra dùng ứng dụng LocalDevVPN riêng cùng `AirliftFFI` để ghép đôi, kết nối dịch vụ thiết bị và ghi patch ngay trên iPhone. Astra không còn chứa packet-tunnel extension và không tự tạo cấu hình VPN.
+Aimlock Hzz dùng ứng dụng LocalDevVPN riêng cùng `AirliftFFI` để ghép đôi, kết nối dịch vụ thiết bị và ghi patch ngay trên iPhone. Aimlock Hzz không còn chứa packet-tunnel extension và không tự tạo cấu hình VPN.
 
 ## Thành phần đã tích hợp
 
 | Thành phần | Trạng thái | Cách xác minh |
 | --- | --- | --- |
-| LocalDevVPN | Ứng dụng bên ngoài | Astra mở `localdevvpn://` và kiểm tra dịch vụ tại `10.7.0.1` |
+| LocalDevVPN | Ứng dụng bên ngoài | Aimlock Hzz mở `localdevvpn://` và kiểm tra dịch vụ tại `10.7.0.1` |
 | VPN tích hợp | Đã gỡ | Không còn `TunnelProv.appex`, target dependency hay quyền `packet-tunnel-provider` |
 | RPPairing host | Đã tích hợp | `al_pairing_run_host` sinh identity, TXT record và PIN thật |
 | Bonjour | Đã tích hợp | Chỉ publish `_remotepairing-pairable-host._tcp` với dữ liệu do RPPairing engine trả về |
@@ -45,18 +49,18 @@ Astra dùng ứng dụng LocalDevVPN riêng cùng `AirliftFFI` để ghép đôi
 
 ## Luồng người dùng trên iOS 27+
 
-1. Cài Astra và ứng dụng LocalDevVPN riêng.
-2. Trong Astra, chọn **Pair trên máy** rồi **Bắt đầu phát sóng**.
-3. Mở **Cài đặt → Quyền riêng tư & Bảo mật → Chế độ nhà phát triển**, chọn **Pair with Astra** và nhập PIN Astra hiển thị.
-4. Mở LocalDevVPN, bật tunnel, trở lại Astra và bấm kiểm tra cho đến khi RSD/Lockdown sẵn sàng.
+1. Cài Aimlock Hzz và ứng dụng LocalDevVPN riêng.
+2. Trong Aimlock Hzz, chọn **Pair trên máy** rồi **Bắt đầu phát sóng**.
+3. Mở **Cài đặt → Quyền riêng tư & Bảo mật → Chế độ nhà phát triển**, chọn **Pair with Aimlock Hzz** và nhập PIN Aimlock Hzz hiển thị.
+4. Mở LocalDevVPN, bật tunnel, trở lại Aimlock Hzz và bấm kiểm tra cho đến khi RSD/Lockdown sẵn sàng.
 5. Bật **Sử dụng AirLift Engine toàn bộ**, chọn patch và áp dụng.
-6. Astra chỉ báo thành công sau khi canary được đọc lại đúng byte và phiên ghi AirTraffic trả về thành công.
+6. Aimlock Hzz chỉ báo thành công sau khi canary được đọc lại đúng byte và phiên ghi AirTraffic trả về thành công.
 
 ## Giới hạn phải giữ rõ
 
 - Khả năng khai thác phụ thuộc đúng bản iOS. Theo upstream AirCard-iOS, iOS 27.2 beta 3 trở lên đã vá đường AirTraffic này.
-- `AirliftFFI` hiện không xuất API đọc một file tùy ý. Vì vậy Astra có thể xác minh canary và phiên ghi, nhưng không thể đọc lại từng file patch nếu sandbox không cho phép truy cập trực tiếp.
-- Vì không đọc được file gốc qua AirLift, Astra không giả vờ rằng có thể sao lưu/khôi phục patch AirLift. Nút áp dụng lại và khôi phục được chặn cho trạng thái này.
+- `AirliftFFI` hiện không xuất API đọc một file tùy ý. Vì vậy Aimlock Hzz có thể xác minh canary và phiên ghi, nhưng không thể đọc lại từng file patch nếu sandbox không cho phép truy cập trực tiếp.
+- Vì không đọc được file gốc qua AirLift, Aimlock Hzz không giả vờ rằng có thể sao lưu/khôi phục patch AirLift. Nút áp dụng lại và khôi phục được chặn cho trạng thái này.
 - Kiểm tra tĩnh trong workspace đã đạt; build/link và runtime vẫn phải được xác nhận bằng Xcode và iPhone thật.
 
 Nguồn `AirliftFFI`: AirCard-iOS commit `40640c4d827aeab8d798285b57d24fcf6be070d0`, giấy phép MIT. Xem `THIRD_PARTY_NOTICES.md`.

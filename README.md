@@ -1,8 +1,8 @@
 <p align="center">
-  <img src="docs/images/app-icon.png" width="132" alt="Astra app icon">
+  <img src="docs/images/app-icon.png" width="132" alt="Aimlock Hzz app icon">
 </p>
 
-<h1 align="center">Astra</h1>
+<h1 align="center">Aimlock Hzz</h1>
 
 <p align="center">
   A native iOS workspace for app-container files, portable patches, limited cleanup, and PosterBoard wallpaper packages.
@@ -23,16 +23,16 @@
 </p>
 
 > [!WARNING]
-> Astra is research software for personal device management. Keep a backup and use it only on devices and data you own. Simulator screenshots demonstrate UI only; they do not verify device-level access.
+> Aimlock Hzz is research software for personal device management. Keep a backup and use it only on devices and data you own. Simulator screenshots demonstrate UI only; they do not verify device-level access.
 
 ## Preview
 
 <p align="center">
-  <img src="docs/images/home.png" width="245" alt="Astra Home">
+  <img src="docs/images/home.png" width="245" alt="Aimlock Hzz Home">
   &nbsp;
-  <img src="docs/images/patches.png" width="245" alt="Astra Patches">
+  <img src="docs/images/patches.png" width="245" alt="Aimlock Hzz Patches">
   &nbsp;
-  <img src="docs/images/cleaner.png" width="245" alt="Astra Cleaner">
+  <img src="docs/images/cleaner.png" width="245" alt="Aimlock Hzz Cleaner">
 </p>
 
 ## What's new in 2.0
@@ -46,7 +46,7 @@
 
 ## What's new in 1.2.6
 
-- **Astra branding** — app display name, product bundle, localizations, documentation, and CI artifact now use Astra.
+- **Aimlock Hzz branding** — app display name, product bundle, localizations, documentation, and CI artifact now use Aimlock Hzz.
 - **Installed-game scanner** — only installed Free Fire variants are shown, using the icon resolved from the device with official bundled fallbacks.
 - **Server-authoritative controls** — feature state is synchronized from the authenticated server session.
 - **Direct support links** — Telegram community and developer actions open directly without Zalo dependencies.
@@ -75,8 +75,8 @@ See the complete [Patch workspace guide](docs/PATCH_GUIDE.md).
 - **File operations** — search, preview, share, import multiple files, copy, move, paste, rename, delete, create files and folders, make ZIP archives, and safely handle name conflicts.
 - **Portable `.3105` patches** — bundle-based rules survive container-ID changes between devices; projects may include files or folders, support optional password protection, and can be imported from Files or a secure website link.
 - **Limited Cleaner** — scans only each app's `Library/Caches` and `tmp`, sorts recoverable size in either direction, supports bulk selection, and requires confirmation before deletion.
-- **Wallpaper Lab** — imports `.tendies` packages, validates payloads, journals installed items, and resets only content installed by Astra.
-- **No persistent jailbreak installation** — Astra does not install a persistent jailbreak, bootstrap, or daemon. Because it uses device-level access and can modify app data, no universal guarantee can be made against every app's integrity policy.
+- **Wallpaper Lab** — imports `.tendies` packages, validates payloads, journals installed items, and resets only content installed by Aimlock Hzz.
+- **No persistent jailbreak installation** — Aimlock Hzz does not install a persistent jailbreak, bootstrap, or daemon. Because it uses device-level access and can modify app data, no universal guarantee can be made against every app's integrity policy.
 - **Localized interface** — English, Vietnamese, and Simplified Chinese.
 
 ## Compatibility
@@ -117,7 +117,7 @@ Do not publish logs, app containers, cookies, account databases, or patch payloa
 
 ## Credits
 
-Astra is maintained by Minh Khải and Sơn Dev. The original 3105 project was developed and designed by [YangJiii](https://x.com/duongduong0908).
+Aimlock Hzz is maintained by Minh Khải and Sơn Dev. The original 3105 project was developed and designed by [YangJiii](https://x.com/duongduong0908).
 
 Special thanks to [0xjohnny](https://x.com/0xjohnny) for [FilzaSlop](https://github.com/0xjohnnydev/FilzaSlop) and related research:
 

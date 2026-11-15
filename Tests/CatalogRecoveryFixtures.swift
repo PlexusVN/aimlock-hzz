@@ -4,7 +4,7 @@ enum CatalogCheckError: Error { case failed(String), writeFailure }
 enum FeaturePatchError: Error { case notAuthenticated }
 enum ProtectedDownloadError: Error { case invalidResponse }
 enum WorseQueryError: Error { case unsupportedOS(String) }
-enum PatchPackageError: Error { case restoreTargetsChanged([String]), symbolicLinkUnsupported }
+enum PatchPackageError: Error { case restoreTargetsChanged([String]), symbolicLinkUnsupported, invalidBundleIdentifier, unsafeTargetPath }
 enum PatchOperationStage: String { case download, decode, target, access, write }
 struct PatchOperationError: Error {
     let stage: PatchOperationStage
@@ -63,13 +63,26 @@ enum DirectPatchExecutor {
         snapshot=Data([1,2,3]);nextProject=PatchProject()
     }
     static func establish(_ projectID:UUID, state:PatchApplicationState = .applied)throws {
-        let receipt=PatchTransactionReceipt(id:UUID(),projectID:projectID,
-            journalURL:root.appendingPathComponent(projectID.uuidString).appendingPathComponent("journal.plist"))
+        if let previous=receipts[projectID],
+           let data=try? Data(contentsOf:previous.journalURL),
+           var journal=(try? PropertyListSerialization.propertyList(from:data,format:nil)) as? [String:Any] {
+            journal["status"]="restored"
+            try PropertyListSerialization.data(fromPropertyList:journal,format:.binary,options:0)
+                .write(to:previous.journalURL,options:.atomic)
+        }
+        let transactionID=UUID()
+        let receipt=PatchTransactionReceipt(id:transactionID,projectID:projectID,
+            journalURL:root.appendingPathComponent(projectID.uuidString).appendingPathComponent(transactionID.uuidString)
+                .appendingPathComponent("journal.plist"))
         receipts[projectID]=receipt;states[projectID]=state
         try FileManager.default.createDirectory(at:receipt.journalURL.deletingLastPathComponent(),withIntermediateDirectories:true)
-        try Data("journal-fixture".utf8).write(to:receipt.journalURL)
-        try store.save(PatchEngineApplicationRecord(projectID:projectID,engine:.worseQuery,
-            baseline:.capturedPriorState,targetKeys:["com.fixture.app\0Documents/file"],journalID:receipt.id,
+        let journal:[String:Any]=["schemaVersion":2,"transactionID":transactionID.uuidString,"projectID":projectID.uuidString,
+            "createdAt":Date(),"status":state == .applied ? "applied":"prepared",
+            "records":[["bundleID":"com.fixture.app","relativePath":"Documents/file","containerFingerprint":Data(repeating:7,count:32)]],
+            "createdDirectories":[]]
+        try PropertyListSerialization.data(fromPropertyList:journal,format:.binary,options:0).write(to:receipt.journalURL,options:.atomic)
+        try store.save(PatchEngineApplicationRecord(projectID:projectID,operationID:transactionID,engine:.worseQuery,
+            baseline:.capturedPriorState,targetKeys:["com.fixture.app\0Documents/file"],journalID:transactionID,
             phase:state == .applied ? .applied:.recoveryRequired))
     }
 }

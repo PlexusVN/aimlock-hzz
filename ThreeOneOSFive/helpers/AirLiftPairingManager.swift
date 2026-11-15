@@ -56,15 +56,15 @@ final class AirLiftPairingManager: NSObject, ObservableObject, NetServiceDelegat
             case .busy:
                 return "Một phiên ghép đôi đang chạy."
             case .localNetworkPermission:
-                return "Astra chưa được phép dùng Mạng cục bộ. Vào Cài đặt → Astra → bật Mạng cục bộ rồi thử lại."
+                return "Aimlock Hzz chưa được phép dùng Mạng cục bộ. Vào Cài đặt → Aimlock Hzz → bật Mạng cục bộ rồi thử lại."
             case .publicationFailed(let message):
-                return "Không thể phát thiết bị Astra qua Bonjour: \(message)"
+                return "Không thể phát thiết bị Aimlock Hzz qua Bonjour: \(message)"
             case .emptyRecord:
                 return "Chưa xác nhận được dữ liệu ghép đôi. Phiên ghép đôi chưa sẵn sàng."
             case .invalidRecord:
-                return "Ghép đôi đã trả dữ liệu nhưng thông tin xác thực chưa đầy đủ. Hãy xoá phiên Astra trong Chế độ nhà phát triển rồi ghép đôi lại."
+                return "Ghép đôi đã trả dữ liệu nhưng thông tin xác thực chưa đầy đủ. Hãy xoá phiên Aimlock Hzz trong Chế độ nhà phát triển rồi ghép đôi lại."
             case .persistenceFailed(let message):
-                return "Ghép đôi hoàn tất nhưng Astra không thể lưu thông tin xác thực an toàn: \(message)"
+                return "Ghép đôi hoàn tất nhưng Aimlock Hzz không thể lưu thông tin xác thực an toàn: \(message)"
             case .failed(let message):
                 return message
             }
@@ -94,8 +94,8 @@ final class AirLiftPairingManager: NSObject, ObservableObject, NetServiceDelegat
         switch bonjourStatus {
         case .idle: return "Chưa phát dịch vụ ghép nối"
         case .preparing: return "Đang khởi tạo RPPairing host"
-        case .publishing: return "Đang đăng ký thiết bị Astra với Bonjour"
-        case .published: return "Thiết bị Astra đang hiển thị để ghép nối"
+        case .publishing: return "Đang đăng ký thiết bị Aimlock Hzz với Bonjour"
+        case .published: return "Thiết bị Aimlock Hzz đang hiển thị để ghép nối"
         case .failed(let detail): return "Bonjour chưa phát được (\(detail))"
         }
     }
@@ -317,11 +317,11 @@ final class AirLiftPairingManager: NSObject, ObservableObject, NetServiceDelegat
         Self.storedAltIRK = ""
         pairingFilePath = nil
         status = .revoked
-        AirLiftGatekeeperManager.shared.triggerRePair(reason: "Thiết bị iPhone đã hủy ghép đôi với Astra trong Cài đặt.")
+        AirLiftGatekeeperManager.shared.triggerRePair(reason: "Thiết bị iPhone đã hủy ghép đôi với Aimlock Hzz trong Cài đặt.")
         let guidance = ExploitSupportPolicy.currentPairingMode == .onDeviceOrImportedFile
             ? "Vui lòng bấm 'Pair trên máy' để ghép đôi lại hoặc nhập pairing file hợp lệ."
-            : "Vui lòng tạo lại file pairing trên máy tính rồi nhập file mới vào Astra."
-        notify(message: "Thiết bị iPhone đã hủy ghép đôi với Astra. \(guidance)")
+            : "Vui lòng tạo lại file pairing trên máy tính rồi nhập file mới vào Aimlock Hzz."
+        notify(message: "Thiết bị iPhone đã hủy ghép đôi với Aimlock Hzz. \(guidance)")
     }
 
     func importPairingFile(from sourceURL: URL) -> Bool {
@@ -366,7 +366,7 @@ final class AirLiftPairingManager: NSObject, ObservableObject, NetServiceDelegat
             if pendingPublication != nil {
                 retryBonjourAdvertisement(userInitiated: true)
             } else {
-                notify(message: "RPPairing đang khởi tạo. Nếu Astra chưa xuất hiện sau 15 giây, hãy đóng hẳn ứng dụng rồi mở lại để tạo phiên mới.")
+                notify(message: "RPPairing đang khởi tạo. Nếu Aimlock Hzz chưa xuất hiện sau 15 giây, hãy đóng hẳn ứng dụng rồi mở lại để tạo phiên mới.")
             }
             return
         }
@@ -382,7 +382,7 @@ final class AirLiftPairingManager: NSObject, ObservableObject, NetServiceDelegat
 
         do {
             _ = try await startAndWait()
-            notify(message: "Ghép đôi thành công. Astra đã lưu thông tin xác thực trên thiết bị.")
+            notify(message: "Ghép đôi thành công. Aimlock Hzz đã lưu thông tin xác thực trên thiết bị.")
         } catch is CancellationError {
             return
         } catch {
@@ -435,7 +435,7 @@ final class AirLiftPairingManager: NSObject, ObservableObject, NetServiceDelegat
                 return
             }
             let returnCode = "0.0.0.0".withCString { bind in
-                "Astra".withCString { name in
+                "Aimlock Hzz".withCString { name in
                     "Mac17,7".withCString { model in
                         outputPath.withCString { output in
                             altIRK.withCString { irk in
@@ -655,7 +655,7 @@ final class AirLiftPairingManager: NSObject, ObservableObject, NetServiceDelegat
         if userInitiated { publicationRetryCount = 0 }
         publishPendingService()
         if userInitiated {
-            notify(message: "Astra đang phát lại thiết bị ghép nối. Hãy giữ Wi‑Fi và quyền Mạng cục bộ bật rồi mở lại Chế độ nhà phát triển.")
+            notify(message: "Aimlock Hzz đang phát lại thiết bị ghép nối. Hãy giữ Wi‑Fi và quyền Mạng cục bộ bật rồi mở lại Chế độ nhà phát triển.")
         }
     }
 
@@ -695,7 +695,7 @@ final class AirLiftPairingManager: NSObject, ObservableObject, NetServiceDelegat
         } else {
             status = .pairing
             notify(message: PairingError.publicationFailed(
-                "\(detail). Kiểm tra Cài đặt → Astra → Mạng cục bộ, bật Wi‑Fi rồi bấm Pair trên máy để phát lại."
+                "\(detail). Kiểm tra Cài đặt → Aimlock Hzz → Mạng cục bộ, bật Wi‑Fi rồi bấm Pair trên máy để phát lại."
             ).localizedDescription)
         }
     }
@@ -743,7 +743,7 @@ final class AirLiftPairingManager: NSObject, ObservableObject, NetServiceDelegat
                       self.pairingThreadActive,
                       self.pendingPublication == nil else { return }
                 self.bonjourStatus = .failed("RPPairing host chưa sẵn sàng")
-                self.notify(message: "RPPairing không tạo được dịch vụ quảng bá sau 15 giây. Hãy đóng hẳn Astra, mở lại và thử ghép đôi lần nữa.")
+                self.notify(message: "RPPairing không tạo được dịch vụ quảng bá sau 15 giây. Hãy đóng hẳn Aimlock Hzz, mở lại và thử ghép đôi lần nữa.")
             }
         }
         hostReadyWatchdog = work

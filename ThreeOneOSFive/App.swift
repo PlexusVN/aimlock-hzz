@@ -273,17 +273,9 @@ class AppState: ObservableObject {
                         }
                         return
                     }
-                    let testFile = (docPath as NSString).appendingPathComponent(".aimlock-access-\(UUID().uuidString).tmp")
-                    do {
-                        try "test".write(toFile: testFile, atomically: true, encoding: .utf8)
-                        try? FileManager.default.removeItem(atPath: testFile)
-                        DispatchQueue.main.async {
-                            self.completeDirectAccessProbe(true)
-                        }
-                        return
-                    } catch {
-                        // fallthrough to next bundle ID
-                    }
+                    // Preparation observes existing access. Creating/deleting
+                    // a probe inside an app's Documents directory is not a
+                    // prerequisite; actual writes belong to the transaction.
                 }
             }
             DispatchQueue.main.async {

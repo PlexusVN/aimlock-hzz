@@ -51,7 +51,7 @@ final class ContainerScanProgress: ObservableObject {
             previous.logs = Array(previous.logs.suffix(200))
             if previous.phase == .scanning {
                 previous.phase = .interrupted
-                previous.detail = "Phiên quét trước chưa hoàn tất. Astra sẽ không tự chạy lại khi mở app."
+                previous.detail = "Phiên quét trước chưa hoàn tất. Aimlock Hzz sẽ không tự chạy lại khi mở app."
                 previous.logs.append(previous.detail)
             }
             snapshot = previous
@@ -63,7 +63,7 @@ final class ContainerScanProgress: ObservableObject {
             .appendingPathComponent("Astra", isDirectory: true).appendingPathComponent("ContainerScanHistory.json")
     }
 
-    func track<T>(bundleID: String, successMessage: String = "Đã tìm thấy thư mục dữ liệu. Astra tiếp tục thao tác bạn đã chọn.", operation: (UUID) throws -> T) throws -> T {
+    func track<T>(bundleID: String, successMessage: String = "Đã tìm thấy thư mục dữ liệu. Aimlock Hzz tiếp tục thao tác bạn đã chọn.", operation: (UUID) throws -> T) throws -> T {
         let id = UUID()
         lock.lock()
         activeID = id
@@ -153,7 +153,7 @@ final class ContainerScanProgress: ObservableObject {
     var shareText: String {
         let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "?"
         let build = Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "?"
-        return (["Astra · Nhật ký quét thư mục · \(version) (\(build))",
+        return (["Aimlock Hzz · Nhật ký quét thư mục · \(version) (\(build))",
           "OS: \(Foundation.ProcessInfo.processInfo.operatingSystemVersionString)",
           "Bundle: \(Bundle.main.bundleIdentifier ?? "?")", "Ứng dụng: \(snapshot.bundleID)",
           "Trạng thái: \(snapshot.phase.rawValue)",

@@ -48,8 +48,16 @@ class IdentityEvidenceChecks(unittest.TestCase):
         store = (ROOT / 'ThreeOneOSFive/helpers/ContainerStore.swift').read_text(encoding='utf-8')
         scan = extract_function(store, 'static func prepareIOS27Access(')
         self.assertNotIn('com.dts.', scan)
-        self.assertNotIn('containerPathForBundleID', scan)
-        self.assertNotIn('MCMActivate', scan)
+        # Exact identifier path lookup is separate from legacy activation. It
+        # precedes anonymous enumeration, but a granted directory read still
+        # validates it; anonymous/cache candidates continue requiring identity.
+        self.assertNotIn('MCMActivateContainerPath(', scan)
+        self.assertLess(scan.index('MCMContainerPathForWorseQuery('), scan.index('while first <= maximum'))
+        self.assertLess(scan.index('containerPathForBundleID('), scan.index('while first <= maximum'))
+        self.assertIn('guard evidence.readable else { return }', scan)
+        self.assertIn('guard let observed = evidence.identifier else { return }', scan)
+        self.assertNotIn('MCMActivateContainer(', scan)
+        self.assertNotIn('bad_query(', scan)
         self.assertIn('readWorseQueryIdentity(clean)', scan)
         self.assertIn('evidence.readable', scan)
         self.assertIn('worseQueryResume', scan)
