@@ -57,6 +57,8 @@ let defaults=UserDefaults.standard
 var catalogApplications:CatalogPatchApplicationRegistry { CatalogPatchApplicationRegistry(defaults:defaults) }
 var patchProjectsDir:URL { Fixture.root }
 var applicationRevision=0
+private var verifiedCatalogVariantsByPatchID:[Int:Set<String>]=[:]
+private var verifiedCatalogAuthRevision:UInt64?
 func patchStorageSlug(_ patch:PatchItem)->String { patch.identity }
 // Busy/inventory presentation has separate actual-method coverage in
 // test_catalog_recovery; this fixture keeps the original provenance scope.
@@ -70,7 +72,8 @@ private func readRecoveryMetadata() throws -> [CatalogRecoveryMetadata] { [] }
 '''
         for signature in ['func restorePatch(', 'private func restorePatchInOperation(',
                           'private func withAuthenticatedPatchOperation<', 'private func catalogProjectID(',
-                          'private func activeCatalogProjectIDs(',
+                          'private func activeCatalogProjectIDs(', 'private func catalogLookupIdentities(',
+                          'private func requireCurrentCatalogForGeneric(',
                           'private func restoreReceipt(', 'private func restoreProjectInOperation(',
                           'private func clearRestoredAssociations(', 'func patchApplicationState(']:
             source += extract_function(feature, signature) + '\n'

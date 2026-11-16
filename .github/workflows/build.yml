@@ -42,7 +42,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: Aimlock-Hzz-Native-Video-Check-2.4-42
+          name: Aimlock-Hzz-Native-Video-Check-2.4-43
           path: ${{ runner.temp }}/aimlock-video-native-check/
           if-no-files-found: ignore
 
@@ -75,6 +75,7 @@ jobs:
             ThreeOneOSFive/helpers/ProtectedArtifactDecoder.swift \
             Tests/ProtectedArtifactSelfCheck.swift -o "$RUNNER_TEMP/astra-security-selfcheck"
           "$RUNNER_TEMP/astra-security-selfcheck" Tests/Fixtures/artifact_crypto_v1.json
+          "$RUNNER_TEMP/astra-security-selfcheck" Tests/Fixtures/artifact_crypto_generic_v1.json
 
       - name: Verify literal license transport and error handling
         run: |
@@ -135,6 +136,7 @@ jobs:
             ThreeOneOSFive/helpers/PatchTransaction.swift \
             Tests/CatalogApplicationSelfCheck.swift -o "$RUNNER_TEMP/astra-catalog-selfcheck"
           "$RUNNER_TEMP/astra-catalog-selfcheck" Tests/Fixtures/catalog
+          "$RUNNER_TEMP/astra-catalog-selfcheck" Tests/Fixtures/catalog-generic
 
       - name: Verify network-only policy and legacy integrity regressions
         run: |
@@ -179,7 +181,7 @@ jobs:
           test -d "$APP_NAME"
           test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleDisplayName' "$APP_NAME/Info.plist")" = "Aimlock Hzz"
           test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$APP_NAME/Info.plist")" = "2.4"
-          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$APP_NAME/Info.plist")" = "42"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$APP_NAME/Info.plist")" = "43"
           python3 - "$APP_NAME" <<'PY'
           from pathlib import Path
           import hashlib, sys
@@ -237,5 +239,5 @@ jobs:
       - name: Upload IPA Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: Aimlock-Hzz-Unsigned-IPA-2.4-42
+          name: Aimlock-Hzz-Unsigned-IPA-2.4-43
           path: build/Aimlock-Hzz.ipa

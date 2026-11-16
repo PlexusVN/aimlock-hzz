@@ -6,19 +6,24 @@ struct PatchRule: Codable, Identifiable, Hashable, Sendable {
     var relativePath: String
     var replacementFilename: String
     var replacementData: Data
+    /// Absent in older application-only packages. Preserve supplied metadata so
+    /// catalog target validation can reject unsupported container kinds.
+    var containerKind: String?
 
     init(
         id: UUID = UUID(),
         bundleID: String,
         relativePath: String,
         replacementFilename: String,
-        replacementData: Data
+        replacementData: Data,
+        containerKind: String? = nil
     ) {
         self.id = id
         self.bundleID = bundleID
         self.relativePath = relativePath
         self.replacementFilename = replacementFilename
         self.replacementData = replacementData
+        self.containerKind = containerKind
     }
 
     /// A zero-byte file is a valid replacement; the filename records that the
@@ -32,15 +37,18 @@ struct PatchDirectory: Codable, Identifiable, Hashable, Sendable {
     var id: UUID
     var bundleID: String
     var relativePath: String
+    var containerKind: String?
 
     init(
         id: UUID = UUID(),
         bundleID: String,
-        relativePath: String
+        relativePath: String,
+        containerKind: String? = nil
     ) {
         self.id = id
         self.bundleID = bundleID
         self.relativePath = relativePath
+        self.containerKind = containerKind
     }
 }
 

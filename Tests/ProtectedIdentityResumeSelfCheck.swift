@@ -26,6 +26,7 @@ private final class ResumeMemory {
     var legacyContextBinding: String?
     var rejectTLS = false
     var calls: [String] = []
+    var syncBodies: [[String: Any]] = []
     var statusOverride: Int?
     var corruptRSAEnvelope = false
     var fractionalExpiry = false
@@ -108,8 +109,12 @@ private final class ResumeMemory {
                 payload = ["success":true,"license_binding":binding,"key_id":7,"app_session_id":UUID().uuidString.lowercased(),
                     "app_session_token":"fixture-token","session_expires_at":formatter.string(from:Date().addingTimeInterval(3600))]
             } else if route == "/api/v2/artifacts/sync" {
-                if !syncFailures.isEmpty { throw syncFailures.removeFirst() }
+                syncBodies.append(body)
+                guard body.count == 1, body["package_targets"] as? String == "bundle-identifiers-v1" else {
+                    throw ResumeCheckError.failed("catalog lost the authenticated Bundle-ID package capability")
+                }
                 guard request.value(forHTTPHeaderField:"Authorization") == "Bearer fixture-token" else { throw ResumeCheckError.failed("catalog was anonymous") }
+                if !syncFailures.isEmpty { throw syncFailures.removeFirst() }
                 payload = ["success":true,"categories":[],"patches":[]]
             } else { throw ResumeCheckError.failed("unexpected endpoint: " + route) }
         } catch ProtectedDownloadError.rejected(let code) {
@@ -408,6 +413,9 @@ private final class ResumeMemory {
             let (_,_,auth,transport,flow) = try fixture(); transport.syncFailures = [.rejected("session_expired")]
             _ = try await flow.sync(auth:auth)
             try require(transport.calls.filter{$0 == "/api/v2/artifacts/sync"}.count == 2 && transport.openCount == 2,"only catalog gets one session retry")
+            try require(transport.syncBodies.count == 2 && transport.syncBodies.allSatisfy {
+                $0["package_targets"] as? String == "bundle-identifiers-v1"
+            }, "initial catalog request and its single retry preserve the same signed capability")
         }
         do {
             let (_,_,auth,transport,flow) = try fixture(); transport.syncFailures = [.rejected("session_expired"),.rejected("session_expired")]

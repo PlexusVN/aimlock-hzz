@@ -11,12 +11,15 @@ struct PatchOperationError: Error {
     let underlying: Error
     static func wrap(_ error: Error, at: PatchOperationStage) -> Self { Self(stage:at,underlying:error) }
 }
-struct PatchItem { let id:Int; let name:String; let slug:String; var artifactVariant:String?="fixture" }
-struct Target { var bundleID:String;var relativePath:String }
-struct PatchProject {
-    var id=UUID();var isPrivate=false
-    var allBundleIdentifiers=["com.fixture.app"]
-    var rules:[Target]=[];var directories:[Target]=[]
+struct PatchItem { let id:Int; let name:String; let slug:String; var artifactVariant:String?="ffth" }
+// Production project models are included by the runner. This convenience
+// initializer only supplies a valid application package for recovery scenarios.
+extension PatchProject {
+    init() {
+        self.init(name:"Fixture", bundleIdentifiers:["com.dts.freefireth"],
+                  rules:[PatchRule(bundleID:"com.dts.freefireth",relativePath:"Documents/file",
+                                   replacementFilename:"file",replacementData:Data([1]))])
+    }
 }
 struct Decoded { let project:PatchProject }
 struct Summary { let packageID:UUID }
@@ -24,7 +27,23 @@ enum PatchPackageCodec {
     @MainActor static func decode(_ data:Data,password:String?)throws->Decoded { Decoded(project:Fixture.nextProject) }
     @MainActor static func inspect(_ data:Data)throws->Summary { Summary(packageID:Fixture.nextProject.id) }
 }
-enum AppSecurityConfiguration { static func protectedBundleID(forVariant:String)->String? { "com.fixture.app" } }
+enum AppSecurityConfiguration {
+    static func protectedBundleID(forVariant variant:String)->String? {
+        switch variant {
+        case "ffth":return "com.dts.freefireth"
+        case "ffmax":return "com.dts.freefiremax"
+        case "capcut":return "com.lemon.lvoverseas"
+        default:return nil
+        }
+    }
+    static func supportsProtectedArtifact(variant:String,kind:String)->Bool {
+        switch kind {
+        case "package":return ["ffth","ffmax","capcut","generic"].contains(variant)
+        case "mod","original":return ["ffth","ffmax"].contains(variant)
+        default:return false
+        }
+    }
+}
 enum AppInfo { static let versionTuple=(26,6,2),osBuild="fixture" }
 enum ExploitSupportPolicy { enum Mode { case direct,airLift,unsupported }; static let currentStorageMode:Mode = .direct }
 enum WorseQueryHelper { static let isOSSupported=true,isAvailable=true }
@@ -51,14 +70,15 @@ enum DirectPatchExecutor {
     static let defaults=UserDefaults(suiteName:"catalog-recovery-"+UUID().uuidString)!
     static var store:PatchEngineApplicationStore { PatchEngineApplicationStore(backupRoot:root) }
     static var states:[UUID:PatchApplicationState]=[:], receipts:[UUID:PatchTransactionReceipt]=[:]
-    static var downloads=0,applies=0,restores=0
+    static var downloads=0,prepares=0,applies=0,restores=0
+    static var preparedBundleIDs:[String]=[]
     static var failApply=false,partialApply=false,changed=false,forcedRestore=false,failRestore=false,failInspect=false
     static var snapshot=Data([1,2,3]),nextProject=PatchProject()
     static func reset()throws {
         try? FileManager.default.removeItem(at:root)
         try FileManager.default.createDirectory(at:root,withIntermediateDirectories:true)
         for key in defaults.dictionaryRepresentation().keys { defaults.removeObject(forKey:key) }
-        states=[:];receipts=[:];downloads=0;applies=0;restores=0
+        states=[:];receipts=[:];downloads=0;prepares=0;applies=0;restores=0;preparedBundleIDs=[]
         failApply=false;partialApply=false;changed=false;forcedRestore=false;failRestore=false;failInspect=false
         snapshot=Data([1,2,3]);nextProject=PatchProject()
     }
@@ -78,11 +98,11 @@ enum DirectPatchExecutor {
         try FileManager.default.createDirectory(at:receipt.journalURL.deletingLastPathComponent(),withIntermediateDirectories:true)
         let journal:[String:Any]=["schemaVersion":2,"transactionID":transactionID.uuidString,"projectID":projectID.uuidString,
             "createdAt":Date(),"status":state == .applied ? "applied":"prepared",
-            "records":[["bundleID":"com.fixture.app","relativePath":"Documents/file","containerFingerprint":Data(repeating:7,count:32)]],
+            "records":[["bundleID":"com.dts.freefireth","relativePath":"Documents/file","containerFingerprint":Data(repeating:7,count:32)]],
             "createdDirectories":[]]
         try PropertyListSerialization.data(fromPropertyList:journal,format:.binary,options:0).write(to:receipt.journalURL,options:.atomic)
         try store.save(PatchEngineApplicationRecord(projectID:projectID,operationID:transactionID,engine:.worseQuery,
-            baseline:.capturedPriorState,targetKeys:["com.fixture.app\0Documents/file"],journalID:transactionID,
+            baseline:.capturedPriorState,targetKeys:["com.dts.freefireth\0Documents/file"],journalID:transactionID,
             phase:state == .applied ? .applied:.recoveryRequired))
     }
 }
@@ -92,7 +112,7 @@ enum DirectPatchExecutor {
         Fixture.states[projectID] == .off ? nil : Fixture.receipts[projectID]
     }
     static func recordedApplicationState(projectID:UUID)->PatchApplicationState? { Fixture.states[projectID] }
-    static func prepareContainers(bundleIDs:[String])async throws->[String:URL] { [:] }
+    static func prepareContainers(bundleIDs:[String])async throws->[String:URL] { Fixture.prepares += 1;Fixture.preparedBundleIDs=bundleIDs;return [:] }
     static func prepareContainers(receipt:PatchTransactionReceipt)async throws->[String:URL] { [:] }
     static func inspectExistingApplication(receipt:PatchTransactionReceipt,project:PatchProject,
                                            preparedContainers:[String:URL]?)throws->PatchApplicationState {
@@ -100,7 +120,7 @@ enum DirectPatchExecutor {
     }
     static func inspectRestore(receipt:PatchTransactionReceipt,preparedContainers:[String:URL]?)throws->PatchRestoreInspection {
         if Fixture.failInspect { throw CatalogCheckError.writeFailure }
-        return PatchRestoreInspection(changedTargets:Fixture.changed ? [PatchTargetChange(bundleID:"com.fixture.app",relativePath:"Documents/file",kind:.modified)]:[],currentStateSnapshot:Fixture.snapshot)
+        return PatchRestoreInspection(changedTargets:Fixture.changed ? [PatchTargetChange(bundleID:"com.dts.freefireth",relativePath:"Documents/file",kind:.modified)]:[],currentStateSnapshot:Fixture.snapshot)
     }
     static func apply(project:PatchProject,preparedContainers:[String:URL]?)throws {
         Fixture.applies += 1
@@ -112,9 +132,9 @@ enum DirectPatchExecutor {
                         expectedCurrentState:Data?,preparedContainers:[String:URL])throws {
         if Fixture.failRestore { throw CatalogCheckError.writeFailure }
         if let expectedCurrentState,expectedCurrentState != Fixture.snapshot {
-            throw PatchPackageError.restoreTargetsChanged(["com.fixture.app/Documents/file"])
+            throw PatchPackageError.restoreTargetsChanged(["com.dts.freefireth/Documents/file"])
         }
-        if Fixture.changed && !allowChangedTargets { throw PatchPackageError.restoreTargetsChanged(["com.fixture.app/Documents/file"]) }
+        if Fixture.changed && !allowChangedTargets { throw PatchPackageError.restoreTargetsChanged(["com.dts.freefireth/Documents/file"]) }
         Fixture.restores += 1;Fixture.forcedRestore=allowChangedTargets;Fixture.states[receipt.projectID] = .off
     }
 }

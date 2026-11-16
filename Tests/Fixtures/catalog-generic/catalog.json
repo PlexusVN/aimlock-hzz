@@ -1,0 +1,77 @@
+{
+  "warning": "PUBLIC SYNTHETIC FIXTURE ONLY. Test signer/scalar and benign replacement bytes are public; never trust this signer in production. Filesystem tests use separate temporary directories only.",
+  "derivedFrom": "Tests/Fixtures/artifact_crypto_generic_v1.json",
+  "derivedFromSHA256": "70a035631c5deea7e06005a142adb7c920ddc642127e5648d9fc888b4a1529eb",
+  "signerKeyID": "fixture-rsa-2048",
+  "signerPublicKeyPKCS1Base64": "MIIBCgKCAQEAr9n/1UgBZ61YCy+ISSR+hqZct4woTw6CJBox9CvcPQs6aT7VDOECYHojAOz5gJDPMm9qUhL6utL7XlJ1igdwB/lf0jwy/ec/rzhxR70dHcayOLhV0L30mNbYc4BspPhfvdjaKMpYZSrU2DkYxrRsy8CjC7U1BFOWedaLckBYSDKxUJWhr++Z2aLhsa36rEYRK0HeOWjSu5bcon/Tixg/htKhQ2L/EjVFq2szr8p0TmvZxsDlO/najnIvSA+4RJY103nEhKgQ9ZarIGdJ8U13aGqGh2YA/muSlF8sKsDeyfTMCmEC4Q5cyyY+KibBvHEadcgpb7GtjjFYD9ek0SFS8QIDAQAB",
+  "recipientPrivateHex": "0000000000000000000000000000000000000000000000000000000000000001",
+  "context": {
+    "now": 1730000001,
+    "recipientId": "00000000-0000-4000-8000-000000000001",
+    "sessionId": "00000000-0000-4000-8000-000000000002",
+    "requestNonce": "0102030405060708090a0b0c0d0e0f10"
+  },
+  "fixtures": [
+    {
+      "sourceId": 1004,
+      "variant": "generic",
+      "expectedBundleIdentifiers": [
+        "com.example.editor",
+        "org.demo.Reader"
+      ],
+      "expectedRuleCount": 2,
+      "plaintextSHA256": "d76d48196f58ea8bdeda42af4dc113430e4e758d2b4362a6bb9d15cf83a769f1",
+      "signedManifest": {
+        "protocol": "astra-artifact-v1",
+        "type": "manifest",
+        "algorithm": "RS256",
+        "keyId": "fixture-rsa-2048",
+        "body": {
+          "artifactId": "00000000-0000-4000-8000-000000000004",
+          "releaseId": "generic-interop-fixture-v1",
+          "releaseVersion": 1,
+          "variant": "generic",
+          "kind": "package",
+          "fileName": "generic-fixture.3105",
+          "plaintextSHA256": "d76d48196f58ea8bdeda42af4dc113430e4e758d2b4362a6bb9d15cf83a769f1",
+          "plaintextSize": 1648,
+          "contentEncryption": {
+            "algorithm": "A256GCM",
+            "nonce": "liI8yGD6p3QJc/sa",
+            "tag": "ezV+rg/5eeu7DiXMd0IFfQ=="
+          },
+          "ciphertextSHA256": "43cc3716f044cb843e8365359ebd5c8bd596d7c12a79296e19aa6c6330ec115e",
+          "ciphertextSize": 1648
+        },
+        "signature": "BMkmL0JSaw5dbHzgizjhSGXi3tZQD9HIm4Ph+SNSuWyqdvtypjf3XgWQbKpquxkn8W9+0lxqFxa0dcadoegVcZ4gZaYp4u0XpehWOAOJACY5SuoPCBTDoK4mPHMW+inljsGMOvOtvd/s0cXwQEy5WIm0RpRbigG3/tQZk4uEGfzTbO7k/lT7F8VUFTstHCnn78rGdc2pXEoEp+O2cClRwBxCT6PeiYJ/T/g76ZRVSIzFrMYkTvoJT0GIgIjcjVS6U1PetRE77yNOpcSJ8mbbd1Ozt4UNErZi/L2nzgKm4LTC7UxcKT7uM0o9NtcMOHEC2bW6qGPitcYdsLzgs4XXiQ=="
+      },
+      "signedGrant": {
+        "protocol": "astra-artifact-v1",
+        "type": "grant",
+        "algorithm": "RS256",
+        "keyId": "fixture-rsa-2048",
+        "body": {
+          "grantId": "00000000-0000-4000-8000-000000000003",
+          "artifactId": "00000000-0000-4000-8000-000000000004",
+          "manifestDigest": "16b6758b14413257cd999bcf0eaf85413a4dda258881ac3a9894ffea0230fb05",
+          "recipientId": "00000000-0000-4000-8000-000000000001",
+          "recipientKeySHA256": "698bea63dc44a344663ff1429aea10842df27b6b991ef25866b2c6c02cdcc5be",
+          "sessionId": "00000000-0000-4000-8000-000000000002",
+          "requestNonce": "0102030405060708090a0b0c0d0e0f10",
+          "issuedAt": 1730000000,
+          "expiresAt": 1730000120,
+          "keyEnvelope": {
+            "algorithm": "P256-ECDH-HKDF-SHA256-A256GCM",
+            "ephemeralPublicKey": "BF7ItNTYbXEzl6rV4a7nkIzwJC3Hjg56zJCE5b7vBaN1OcRroGiBPGx9I1BH/htPMNrY8031kWMAG7F9pr9LjSM=",
+            "salt": "yucXa9P/rs4nh6H/iYK8stF+7aIev3N9qoqJGuUaCqk=",
+            "nonce": "+15kJzCRO4jSLFlw",
+            "ciphertext": "EiG+SxW+rzIb7NrE+2P2DdGwRfDzEKcWzIkozYNcx4o=",
+            "tag": "5Z+7TJTSzJNf0eNKo8S91Q=="
+          }
+        },
+        "signature": "gfQh3S2+be9Bd3VrVHEwyW2grBJrwhW8DtoSfFeZ5cbuhhn2HhS3LzIr2ksSB8812kjCw8LgAqStmiqQdwCUejE0OF52noxKI35STgFX2vhXh6cEZTf883saqukRzDO06qt9EBjxnVYk5HwmQeQpDON2d3ASFZ0B2I7381C/HrMW6z9tscxXrCdfBLD2f3QkDz5SUmQvUQ35C3MHluBbTTE5ljpqpEukHEg0f7SOQFwfGtPa+ysNG/f0M6TG8A6ZydnlEF0Nf1z7qkMRc/ykybKQPKa5GImAnBDWCxCVvRazn07fEskAkyf76XgGHlnW9r6KtTWVFwWfGE/jdkLeFQ=="
+      },
+      "ciphertextBase64": "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"
+    }
+  ]
+}

@@ -10,10 +10,13 @@ from check_airlift_pairing_finish import extract_function
 ROOT = Path(__file__).resolve().parents[1]
 METHODS = [
     'func applyPatch(', 'private func applyPatchInOperation(',
+    'private func validateCatalogPackageTargets(',
     'func inspectPatchRestore(', 'func inspectRecoveryRestore(',
     'func restorePatch(', 'func restoreRecovery(',
     'private func withAuthenticatedPatchOperation<', 'private func catalogProjectID(',
     'private func activeCatalogProjectIDs(',
+    'private func catalogLookupIdentities(',
+    'private func requireCurrentCatalogForGeneric(',
     'private func restorePatchInOperation(', 'private func restoreReceipt(',
     'private func inspectProjectRestore(', 'private func restoreProjectInOperation(',
     'private func beginPatchOperation(', 'private func endPatchOperation(',
@@ -37,8 +40,9 @@ def production_sources():
     code += source[source.index('struct PatchRecoveryItem:'):source.index('struct PatchCategory:')]
     code += transaction[transaction.index('struct PatchTransactionReceipt:'):transaction.index('enum PatchTransaction {')]
     code += extract_function(source, 'enum PatchRestoreError:') + '\n'
-    code += (ROOT / 'Tests/CatalogRecoveryFixtures.swift').read_text(encoding='utf-8')
     models = (ROOT / 'ThreeOneOSFive/helpers/PatchProjectModels.swift').read_text(encoding='utf-8')
+    code += models[:models.index('enum PatchProjectAccessPolicy {')]
+    code += (ROOT / 'Tests/CatalogRecoveryFixtures.swift').read_text(encoding='utf-8')
     code += extract_function(models, 'enum PatchPackageLimits {') + '\n'
     code += 'enum PatchPathValidator {\n'
     for signature in ['static func canonicalBundleIdentifier(', 'static func canonicalRelativePath(']:
@@ -58,6 +62,11 @@ private var requestedStateOverrides:[String:Bool]=[:]
 private var requestedProjectOverrides:[UUID:Bool]=[:]
 private var requestedStateBindings:[String:String]=[:]
 private var requestedProjectBindings:[UUID:String]=[:]
+private var verifiedCatalogVariantsByPatchID:[Int:Set<String>]=[:]
+private var verifiedCatalogAuthRevision:UInt64?
+func adoptVerifiedCatalogForFixture(_ variants:[Int:Set<String>], revision:UInt64=1) {
+    verifiedCatalogVariantsByPatchID=variants;verifiedCatalogAuthRevision=revision
+}
 func localPatchURL(_ patch:PatchItem)->URL { Fixture.root.appendingPathComponent("unused-legacy-download") }
 func downloadPatch(_ patch:PatchItem,auth:AuthManager)async throws->URL {
   Fixture.downloads += 1

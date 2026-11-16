@@ -1,3 +1,7 @@
+## Build 2.4 (43): Đồng bộ package tổng quát với Auth
+
+App khai báo hỗ trợ package tổng quát trong request sync đã ký, nhận manifest generic và xác minh các ứng dụng đích trong nội dung gói. Gói legacy vẫn tương thích. Xem [thay đổi và kiểm chứng](docs/GENERIC_PACKAGES_43.md).
+
 ## Build 2.4 (42): Hoàn tất đối chiếu và sửa các luồng còn thiếu
 
 Sửa toàn bộ các điểm A01–A10 trong báo cáo so sánh build 41: recovery identity/download, binding OFF legacy, re-enable qua bảng xác nhận hiện có, exact lookup với hints cũ, directory-only verification, HWID fallback tương thích và text quyền mạng. Không thêm panel recovery hoặc đổi cấu hình Auth/engine. Xem [thay đổi và giới hạn kiểm chứng](docs/REFERENCE_PARITY_FIX_42.md).

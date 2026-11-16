@@ -52,7 +52,8 @@ struct FixturePublisher { func send() {} }
 }
 enum FeaturePatchError:Error { case notAuthenticated }
 enum PatchRestoreError:Error { case missingReceipt, confirmationExpired, recoveryRequired }
-struct PatchItem { let identity:String }
+struct PatchItem { let identity:String; var id:Int=1; var artifactVariant:String?="ffth" }
+enum ProtectedDownloadError:Error { case invalidResponse }
 enum WorseQueryHelper {
     static let isAvailable=false
     static func isScopeSupported(for path:String)->Bool { false }

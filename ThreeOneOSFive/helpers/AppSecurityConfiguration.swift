@@ -23,6 +23,15 @@ enum AppSecurityConfiguration {
     static let signingPublicKeyPKCS1Base64 = "MIIBCgKCAQEAxF0kg3/mMZY//nPiXgj7YnZEEDJ0aiDdiNfw3cUgJfxeeBmA6+1C51Xd/fX3rI6zoIDzjt9o+Dmb/YiySHBEBwyicCXC1zeEF9m3Jo5ybaS5sEgQvUWF0v4QM8CoEuj3hGzgNDfOwRrWBcPSrPzEJTsjcUt8X/azC5MVFgVV6maJHcV1MH/i7ywzkNH7CtU1p246PQEg1KyF89kHbpWa0N8/D/DDeG5viLKlB4OxBlm/ZVDITaWqGoRVlq8QuuXUCfdHOY2Rl7I3P/bT0Wsmibek0RSUnmEW+AzUsEbqK882hbjHS4JPMIE4YViuhxMF9gqHiQ65pHrxCenGP5nXUwIDAQAB"
     static let productSecret = "aimlock-hzz"
     static var isConfigured: Bool { true }
+    /// Protocol support is separate from a legacy variant's single target.
+    /// Generic packages carry their own validated Bundle IDs in the package.
+    static func supportsProtectedArtifact(variant: String, kind: String) -> Bool {
+        switch kind {
+        case "package": return ["ffth", "ffmax", "capcut", "generic"].contains(variant)
+        case "mod", "original": return ["ffth", "ffmax"].contains(variant)
+        default: return false
+        }
+    }
     /// Preparation targets derive from the same catalog capability map.
     static var protectedBundleIDs: [String] {
         ["ffth", "ffmax", "capcut"].compactMap { protectedBundleID(forVariant: $0) }.sorted()

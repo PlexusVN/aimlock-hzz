@@ -39,6 +39,11 @@ DerivedData/
 !/Tests/Fixtures/
 /Tests/Fixtures/*
 !/Tests/Fixtures/artifact_crypto_v1.json
+!/Tests/Fixtures/artifact_crypto_generic_v1.json
+!/Tests/Fixtures/catalog-generic/
+/Tests/Fixtures/catalog-generic/*
+!/Tests/Fixtures/catalog-generic/catalog.json
+!/Tests/Fixtures/catalog-generic/1004.3105
 /CONTRIBUTING.md
 /SECURITY.md
 

@@ -427,6 +427,10 @@ final class FeaturePatchService: ObservableObject {
     private var requestedStateBindings: [String: String] = [:]
     private var requestedProjectBindings: [UUID: String] = [:]
     private var catalogSyncRevision: UInt64 = 0
+    // Only a successful authenticated sync proves that a variant was retired.
+    // Cached display metadata must never adopt another variant's live backup.
+    private var verifiedCatalogVariantsByPatchID: [Int: Set<String>] = [:]
+    private var verifiedCatalogAuthRevision: UInt64?
     private var nativeSessionToken = ""
     private var nativeSessionExpiresAt: Date?
     private var nativeSessionKey = ""
@@ -541,6 +545,8 @@ final class FeaturePatchService: ObservableObject {
 
     func syncFromServer(auth: AuthManager) async {
         guard auth.authState == .verified else {
+            verifiedCatalogVariantsByPatchID = [:]
+            verifiedCatalogAuthRevision = nil
             print("[FeaturePatch] sync blocked: not authenticated")
             return
         }
@@ -548,6 +554,8 @@ final class FeaturePatchService: ObservableObject {
         let authRevision = auth.authenticationRevision
         catalogSyncRevision &+= 1
         let syncRevision = catalogSyncRevision
+        verifiedCatalogVariantsByPatchID = [:]
+        verifiedCatalogAuthRevision = nil
         isLoading = true
         catalogError = nil
         defer { if catalogSyncRevision == syncRevision { isLoading = false } }
@@ -572,6 +580,9 @@ final class FeaturePatchService: ObservableObject {
             for previous in patches { _ = patchStorageSlug(previous) }
             categories = response.categories
             patches = response.patches
+            verifiedCatalogVariantsByPatchID = Dictionary(grouping: response.patches, by: \.id)
+                .mapValues { Set($0.compactMap(\.artifactVariant)) }
+            verifiedCatalogAuthRevision = authRevision
             preloadCategoryImages()
             print("[FeaturePatch] sync OK: \(categories.count) categories, \(patches.count) patches")
 
@@ -582,6 +593,8 @@ final class FeaturePatchService: ObservableObject {
         } catch {
             guard auth.authenticationRevision == authRevision, catalogSyncRevision == syncRevision else { return }
             categories = []; patches = []
+            verifiedCatalogVariantsByPatchID = [:]
+            verifiedCatalogAuthRevision = nil
             catalogError = error.localizedDescription
             nativeStatusMessage = error.localizedDescription
             print("[FeaturePatch] protected catalog unavailable")
@@ -654,6 +667,11 @@ final class FeaturePatchService: ObservableObject {
         var associatedProjectID: UUID?
         var stage = PatchOperationStage.download
         do {
+            if patch.artifactVariant == "generic" {
+                stage = .target
+                try requireCurrentCatalogForGeneric(patch, revision: authRevision)
+                stage = .download
+            }
             // Requested OFF and actual file state are separate. An ON retry
             // must reuse a verified old receipt or safely restore it first;
             // it must never capture patched bytes as a fresh baseline.
@@ -679,11 +697,7 @@ final class FeaturePatchService: ObservableObject {
                 throw PatchRestoreError.recoveryRequired
             }
             stage = .target
-            guard let expectedBundleID = AppSecurityConfiguration.protectedBundleID(forVariant: patch.artifactVariant ?? ""),
-                  !project.allBundleIdentifiers.isEmpty,
-                  project.allBundleIdentifiers.allSatisfy({ $0 == expectedBundleID }) else {
-                throw ProtectedDownloadError.invalidResponse
-            }
+            try validateCatalogPackageTargets(project, variant: patch.artifactVariant ?? "")
             stage = .access
             log("patch engine: iOS=\(AppInfo.versionTuple) build=\(AppInfo.osBuild) worseQueryOS=\(WorseQueryHelper.isOSSupported) worseQueryReady=\(WorseQueryHelper.isAvailable) storage=\(ExploitSupportPolicy.currentStorageMode)")
             guard ExploitSupportPolicy.currentStorageMode != .unsupported else {
@@ -805,8 +819,55 @@ final class FeaturePatchService: ObservableObject {
         }
     }
 
+    /// The verified package owns generic application identities. Legacy variants
+    /// retain their exact single-application binding; neither path grants native
+    /// or group-container capabilities from package metadata.
+    private func validateCatalogPackageTargets(_ project: PatchProject, variant: String) throws {
+        guard AppSecurityConfiguration.supportsProtectedArtifact(variant: variant, kind: "package"),
+              !project.rules.isEmpty,
+              !project.allBundleIdentifiers.isEmpty else {
+            throw ProtectedDownloadError.invalidResponse
+        }
+        let bundleIDs = project.allBundleIdentifiers
+        var declared = Set<String>()
+        for bundleID in project.bundleIdentifiers {
+            guard try PatchPathValidator.canonicalBundleIdentifier(bundleID) == bundleID,
+                  declared.insert(bundleID).inserted else {
+                throw ProtectedDownloadError.invalidResponse
+            }
+        }
+        for bundleID in bundleIDs {
+            guard try PatchPathValidator.canonicalBundleIdentifier(bundleID) == bundleID else {
+                throw ProtectedDownloadError.invalidResponse
+            }
+        }
+        let targets = project.rules.map { ($0.bundleID, $0.relativePath, $0.containerKind) }
+            + project.directories.map { ($0.bundleID, $0.relativePath, $0.containerKind) }
+        var targetKeys = Set<String>()
+        for (bundleID, path, _) in targets {
+            guard (declared.isEmpty || declared.contains(bundleID)),
+                  try PatchPathValidator.canonicalRelativePath(path) == path,
+                  targetKeys.insert(bundleID + "\0" + path).inserted else {
+                throw ProtectedDownloadError.invalidResponse
+            }
+        }
+        if variant == "generic" {
+            guard bundleIDs.count <= 256, project.bundleIdentifiers.count <= 256,
+                  project.rules.count <= 256, project.directories.count <= 256,
+                  targets.allSatisfy({ $0.2 == nil || $0.2 == "application" }) else {
+                throw ProtectedDownloadError.invalidResponse
+            }
+        } else {
+            guard let expectedBundleID = AppSecurityConfiguration.protectedBundleID(forVariant: variant),
+                  bundleIDs.allSatisfy({ $0 == expectedBundleID }) else {
+                throw ProtectedDownloadError.invalidResponse
+            }
+        }
+    }
+
     func inspectPatchRestore(_ patch: PatchItem, auth: AuthManager) async throws -> PatchRestoreConfirmation {
         try await withAuthenticatedPatchOperation(auth: auth) { operationID, revision in
+            try self.requireCurrentCatalogForGeneric(patch, revision: revision)
             let projectID = try self.catalogProjectID(patch)
             return try await self.inspectProjectRestore(projectID, auth: auth, revision: revision, operationID: operationID)
         }
@@ -869,25 +930,54 @@ final class FeaturePatchService: ObservableObject {
     }
 
     private func activeCatalogProjectIDs(for identity: String) throws -> Set<UUID> {
-        let preferred = catalogApplications.projectID(for: identity)
+        let identities = catalogLookupIdentities(for: identity)
+        let preferred = Set(identities.compactMap { catalogApplications.projectID(for: $0) })
         var candidates = Set(try readRecoveryMetadata().filter {
-            $0.catalogIdentity == identity
+            identities.contains($0.catalogIdentity)
         }.map(\.projectID))
-        if let preferred { candidates.insert(preferred) }
+        candidates.formUnion(preferred)
         return Set(candidates.filter { projectID in
             if let state = StorageEngineCoordinator.shared.projectApplicationState(projectID) {
                 return state.requiresRestore
             }
             // A stale ON preference with missing history is uncertainty. A
             // metadata-only entry before any journal, however, is not an ON.
-            return projectID == preferred && catalogApplications.state(for: identity,
-                recordedState: { _ in nil }).requiresRestore
+            return preferred.contains(projectID) && identities.contains { candidate in
+                catalogApplications.projectID(for: candidate) == projectID &&
+                    catalogApplications.state(for: candidate, recordedState: { _ in nil }).requiresRestore
+            }
         })
+    }
+
+    /// A generic publication may replace one old application variant under the
+    /// same catalog ID. Read its retired aliases without moving journals or
+    /// choosing among competing active projects. Published siblings stay apart.
+    private func catalogLookupIdentities(for identity: String) -> Set<String> {
+        let parts = identity.split(separator: "_", maxSplits: 2, omittingEmptySubsequences: false)
+        guard parts.count == 3, parts[0] == "catalog", parts[2] == "generic",
+              let patchID = Int(parts[1]), String(patchID) == parts[1],
+              let published = verifiedCatalogVariantsByPatchID[patchID], published.contains("generic") else {
+            return [identity]
+        }
+        var result: Set<String> = [identity]
+        for variant in ["ffth", "ffmax", "capcut"] where !published.contains(variant) {
+            result.insert("catalog_\(patchID)_" + variant)
+        }
+        return result
+    }
+
+    private func requireCurrentCatalogForGeneric(_ patch: PatchItem, revision: UInt64) throws {
+        guard patch.artifactVariant == "generic" else { return }
+        guard verifiedCatalogAuthRevision == revision,
+              verifiedCatalogVariantsByPatchID[patch.id]?.contains("generic") == true else {
+            throw ProtectedDownloadError.invalidResponse
+        }
     }
 
     private func restorePatchInOperation(_ patch: PatchItem, auth: AuthManager, operationID: UUID,
                                          expectedRevision: UInt64,
                                          confirmation: PatchRestoreConfirmation? = nil) async throws {
+        try requireCurrentCatalogForGeneric(patch, revision: expectedRevision)
         let projectID = try catalogProjectID(patch)
         try await restoreProjectInOperation(projectID, auth: auth, revision: expectedRevision,
                                             operationID: operationID, confirmation: confirmation)
@@ -1030,7 +1120,9 @@ final class FeaturePatchService: ObservableObject {
         }
         do {
             var rows = try readRecoveryMetadata()
-            for index in rows.indices where rows[index].catalogIdentity == identity {
+            let identities = catalogLookupIdentities(for: identity)
+            for index in rows.indices where rows[index].catalogIdentity == identity ||
+                (projectID != nil && rows[index].projectID == projectID && identities.contains(rows[index].catalogIdentity)) {
                 // A catalog identity can retain old terminal transactions. Each
                 // row is bound to its own journal, never to another row's receipt.
                 let rowID = rows[index].projectID
@@ -1182,9 +1274,9 @@ final class FeaturePatchService: ObservableObject {
             let activeIDs = try activeCatalogProjectIDs(for: identity)
             guard activeIDs.count == 1, let projectID = activeIDs.first else { return false }
             let metadata = try readRecoveryMetadata().first {
-                $0.catalogIdentity == identity && $0.projectID == projectID
+                catalogLookupIdentities(for: identity).contains($0.catalogIdentity) && $0.projectID == projectID
             }
-            let requested = requestedStateValue(projectID: projectID, identity: identity, metadata: metadata)
+            let requested = requestedStateValue(projectID: projectID, identity: metadata?.catalogIdentity ?? identity, metadata: metadata)
             guard state == .applied else { return false }
             return requested ?? true
         } catch { return false }

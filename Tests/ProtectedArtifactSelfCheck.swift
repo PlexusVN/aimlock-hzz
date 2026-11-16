@@ -78,6 +78,7 @@ struct ProtectedArtifactSelfCheck {
         let fixtureData = try Data(contentsOf: URL(fileURLWithPath: path))
         let fixture = try JSONSerialization.jsonObject(with: fixtureData) as! [String: Any]
         let manifestObject = fixture["signedManifest"] as! [String: Any]
+        try checkSignedManifestCapability(manifestObject)
         let grantObject = fixture["signedGrant"] as! [String: Any]
         let grantBody = grantObject["body"] as! [String: Any]
         let context = fixture["verificationContext"] as! [String: Any]
@@ -151,6 +152,44 @@ struct ProtectedArtifactSelfCheck {
         try checkRequestRegistry()
         try await checkNetworkGate()
         print("Astra security self-check: \(checks) checks passed")
+    }
+
+    static func checkSignedManifestCapability(_ template: [String: Any]) throws {
+        let attributes: [String: Any] = [kSecAttrKeyType as String: kSecAttrKeyTypeRSA,
+                                        kSecAttrKeySizeInBits as String: 2048]
+        guard let privateKey = SecKeyCreateRandomKey(attributes as CFDictionary, nil),
+              let publicKey = SecKeyCopyPublicKey(privateKey),
+              let publicData = SecKeyCopyExternalRepresentation(publicKey, nil) else {
+            throw SelfCheckFailure.failed("artifact capability test RSA generation")
+        }
+        let verifier = ServerSignatureVerifier(trustedPublicKeys: ["capability-fixture": publicData as Data])
+        let decoder = ProtectedArtifactDecoder(verifier: verifier,
+            recipientIdentity: { throw SelfCheckFailure.failed("manifest verification requested a device identity") },
+            sharedSecret: { _ in throw SelfCheckFailure.failed("manifest verification requested an agreement secret") })
+        for variant in ["ffth", "ffmax", "capcut", "generic", "unknown"] {
+            for kind in ["package", "mod", "original", "unknown"] {
+                var object = template
+                object.removeValue(forKey: "signature")
+                object["keyId"] = "capability-fixture"
+                var body = object["body"] as! [String: Any]
+                body["variant"] = variant; body["kind"] = kind; object["body"] = body
+                guard let signature = SecKeyCreateSignature(privateKey, .rsaSignatureMessagePKCS1v15SHA256,
+                        try ProtectedArtifactDecoder.canonicalData(object) as CFData, nil) else {
+                    throw SelfCheckFailure.failed("artifact capability test RSA signature")
+                }
+                object["signature"] = (signature as Data).base64EncodedString()
+                let data = try json(object)
+                let allowed = (kind == "package" && ["ffth", "ffmax", "capcut", "generic"].contains(variant))
+                    || (["mod", "original"].contains(kind) && ["ffth", "ffmax"].contains(variant))
+                if allowed {
+                    let result = try decoder.verifyManifest(data)
+                    try require(result.variant == variant && result.kind == kind,
+                                "supported signed manifest: \(variant)/\(kind)")
+                } else {
+                    try rejects("unsupported signed manifest: \(variant)/\(kind)") { _ = try decoder.verifyManifest(data) }
+                }
+            }
+        }
     }
 
     static func checkResponseEnvelope() throws {

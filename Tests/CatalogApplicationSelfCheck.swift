@@ -57,7 +57,8 @@ struct CatalogApplicationSelfCheck {
         let context = fixture["context"] as! [String: Any]
         let recipient = try P256.KeyAgreement.PrivateKey(rawRepresentation: hex(fixture["recipientPrivateHex"] as! String))
         let publicKey = Data(base64Encoded: fixture["signerPublicKeyPKCS1Base64"] as! String)!
-        let verifier = ServerSignatureVerifier(trustedPublicKeys: ["public-catalog-test-rsa": publicKey])
+        let signerKeyID = fixture["signerKeyID"] as? String ?? "public-catalog-test-rsa"
+        let verifier = ServerSignatureVerifier(trustedPublicKeys: [signerKeyID: publicKey])
         let recipientID = context["recipientId"] as! String, sessionID = context["sessionId"] as! String, nonce = context["requestNonce"] as! String
         let decoder = ProtectedArtifactDecoder(verifier: verifier, recipientIdentity: { (recipientID, recipient.publicKey.x963Representation) },
             sharedSecret: { try recipient.sharedSecretFromKeyAgreement(with: P256.KeyAgreement.PublicKey(x963Representation: $0)) })
@@ -102,16 +103,49 @@ struct CatalogApplicationSelfCheck {
                 try check(plain == Data(contentsOf: folder.appendingPathComponent("\(sourceID).3105")), "protected plaintext differs")
                 var project = try PatchPackageCodec.decode(plain, password: nil).project
                 project.isPrivate = true
-                try check(project.allBundleIdentifiers.allSatisfy { $0 == AppSecurityConfiguration.protectedBundleID(forVariant: variant) }, "apply bundle mismatch")
-                let base = temp.appendingPathComponent(String(sourceID), isDirectory: true), container = base.appendingPathComponent("container", isDirectory: true)
-                try manager.createDirectory(at: container, withIntermediateDirectories: true)
-                let original = Data("public original test content".utf8)
-                for rule in project.rules {
-                    let target = container.appendingPathComponent(rule.relativePath)
-                    try manager.createDirectory(at: target.deletingLastPathComponent(), withIntermediateDirectories: true)
-                    try original.write(to: target)
+                let bundleIDs = project.allBundleIdentifiers.sorted()
+                if variant == "generic" {
+                    guard let expected = entry["expectedBundleIdentifiers"] as? [String] else {
+                        throw CatalogCheckError.failed("generic fixture is missing its expected targets")
+                    }
+                    try check(!expected.isEmpty && Set(expected).count == expected.count && bundleIDs == expected.sorted(),
+                              "generic package changed its expected Bundle IDs")
+                    try check(Set(project.rules.map(\.bundleID)) == Set(expected),
+                              "generic fixture did not exercise every target through an actual replacement rule")
+                    if let expectedRuleCount = entry["expectedRuleCount"] as? Int {
+                        try check(project.rules.count == expectedRuleCount, "generic fixture changed its rule count")
+                    }
+                    try check((manifest["body"] as! [String: Any])["variant"] as? String == "generic",
+                              "generic fixture did not use a signed generic manifest")
+                } else {
+                    try check(bundleIDs.allSatisfy { $0 == AppSecurityConfiguration.protectedBundleID(forVariant: variant) }, "apply bundle mismatch")
                 }
-                let receipt = try PatchTransaction.apply(project: project, backupRoot: base.appendingPathComponent("backups"), containerResolver: { _ in container })
+                let base = temp.appendingPathComponent(String(sourceID), isDirectory: true)
+                var resolvedContainers: [String: URL] = [:]
+                for bundleID in bundleIDs {
+                    let container = base.appendingPathComponent("containers", isDirectory: true)
+                        .appendingPathComponent(UUID().uuidString, isDirectory: true)
+                    try manager.createDirectory(at: container, withIntermediateDirectories: true)
+                    resolvedContainers[bundleID] = container
+                }
+                let containers = resolvedContainers
+                try check(containers.count == bundleIDs.count && Set(containers.values.map(\.path)).count == bundleIDs.count,
+                          "different fixture Bundle IDs shared a temporary container")
+                let containerResolver: @Sendable (String) throws -> URL = { bundleID in
+                    guard let container = containers[bundleID] else {
+                        throw CatalogCheckError.failed("unregistered fixture Bundle ID: " + bundleID)
+                    }
+                    return container
+                }
+                let originalFor: (PatchRule) -> Data = { rule in
+                    Data("public original test content for \(rule.bundleID)/\(rule.relativePath)".utf8)
+                }
+                for rule in project.rules {
+                    let target = try containerResolver(rule.bundleID).appendingPathComponent(rule.relativePath)
+                    try manager.createDirectory(at: target.deletingLastPathComponent(), withIntermediateDirectories: true)
+                    try originalFor(rule).write(to: target)
+                }
+                let receipt = try PatchTransaction.apply(project: project, backupRoot: base.appendingPathComponent("backups"), containerResolver: containerResolver)
                 let backupRoot = base.appendingPathComponent("backups")
                 let suite = "astra-catalog-check-" + UUID().uuidString
                 let defaults = UserDefaults(suiteName: suite)!
@@ -128,24 +162,27 @@ struct CatalogApplicationSelfCheck {
                 let relaunched = CatalogPatchApplicationRegistry(defaults: defaults)
                 try check(relaunched.state(for: catalogID, recordedState: lookup) == .applied, "relaunch lost applied state")
                 let oldJournal = try Data(contentsOf: receipt.journalURL)
-                try check(PatchTransaction.inspectExistingApplication(receipt: receipt, project: project, containerResolver: { _ in container }) == .applied,
+                try check(PatchTransaction.inspectExistingApplication(receipt: receipt, project: project, containerResolver: containerResolver) == .applied,
                     "existing identical application must be adopted")
                 try check(Data(contentsOf: receipt.journalURL) == oldJournal, "adopting an application overwrote its journal")
                 var differentRelease = project
                 differentRelease.rules[0].replacementData.append(0)
-                try check(PatchTransaction.inspectExistingApplication(receipt: receipt, project: differentRelease, containerResolver: { _ in container }) == .recoveryRequired,
+                try check(PatchTransaction.inspectExistingApplication(receipt: receipt, project: differentRelease, containerResolver: containerResolver) == .recoveryRequired,
                     "different release must require restore")
-                for rule in project.rules { try check(Data(contentsOf: container.appendingPathComponent(rule.relativePath)) == rule.replacementData, "apply bytes differ") }
+                for rule in project.rules {
+                    try check(Data(contentsOf: containerResolver(rule.bundleID).appendingPathComponent(rule.relativePath)) == rule.replacementData,
+                              "apply bytes differ for " + rule.bundleID)
+                }
                 let backupFiles = manager.enumerator(at: receipt.journalURL.deletingLastPathComponent(), includingPropertiesForKeys: nil)!.allObjects as! [URL]
                 try check(!backupFiles.contains { $0.pathExtension == "applied" }, "private plaintext cached in backup")
-                let firstTarget = container.appendingPathComponent(project.rules[0].relativePath)
-                try original.write(to: firstTarget)
-                try check(PatchTransaction.inspectExistingApplication(receipt: receipt, project: project, containerResolver: { _ in container }) == .recoveryRequired,
+                let firstTarget = try containerResolver(project.rules[0].bundleID).appendingPathComponent(project.rules[0].relativePath)
+                try originalFor(project.rules[0]).write(to: firstTarget)
+                try check(PatchTransaction.inspectExistingApplication(receipt: receipt, project: project, containerResolver: containerResolver) == .recoveryRequired,
                     "changed target must not be silently marked applied")
                 try project.rules[0].replacementData.write(to: firstTarget)
                 registry.markRecoveryRequired(catalogID)
                 do {
-                    try PatchTransaction.restore(receipt: receipt, containerResolver: { _ in container }, beforeWrite: { _ in throw CatalogCheckError.failed("injected restore failure") })
+                    try PatchTransaction.restore(receipt: receipt, containerResolver: containerResolver, beforeWrite: { _ in throw CatalogCheckError.failed("injected restore failure") })
                     throw CatalogCheckError.failed("restore fault did not propagate")
                 } catch PatchPackageError.restoreFailed {}
                 try check(registry.state(for: catalogID, recordedState: lookup) == .recoveryRequired, "failed restore erased recovery state")
@@ -156,10 +193,13 @@ struct CatalogApplicationSelfCheck {
                 journal["status"] = "prepared"
                 try PropertyListSerialization.data(fromPropertyList: journal, format: .binary, options: 0).write(to: receipt.journalURL)
                 try check(PatchTransaction.recordedApplicationState(receipt: receipt) == .recoveryRequired, "prepared journal must show recovery")
-                try check(PatchTransaction.inspectExistingApplication(receipt: receipt, project: project, containerResolver: { _ in container }) == .recoveryRequired,
+                try check(PatchTransaction.inspectExistingApplication(receipt: receipt, project: project, containerResolver: containerResolver) == .recoveryRequired,
                     "prepared journal must never be adopted as applied")
-                try PatchTransaction.restore(receipt: receipt, containerResolver: { _ in container })
-                for rule in project.rules { try check(Data(contentsOf: container.appendingPathComponent(rule.relativePath)) == original, "restore bytes differ") }
+                try PatchTransaction.restore(receipt: receipt, containerResolver: containerResolver)
+                for rule in project.rules {
+                    try check(Data(contentsOf: containerResolver(rule.bundleID).appendingPathComponent(rule.relativePath)) == originalFor(rule),
+                              "restore mixed original bytes for " + rule.bundleID)
+                }
                 // A committed restore wins over stale UI flags, including a
                 // process interruption before the preference cleanup.
                 registry.markApplied(catalogID)
@@ -170,14 +210,14 @@ struct CatalogApplicationSelfCheck {
                 let revokedBackups = base.appendingPathComponent("revoked-backups")
                 do {
                     _ = try await DirectPatchExecutor.run(validation: {}) {
-                        try PatchTransaction.apply(project: commitProject, backupRoot: revokedBackups, containerResolver: { _ in container }, beforeWrite: { index in
+                        try PatchTransaction.apply(project: commitProject, backupRoot: revokedBackups, containerResolver: containerResolver, beforeWrite: { index in
                             if index == 0 { NotificationCenter.default.post(name: Notification.Name("AstraNetworkAccessInvalidated"), object: nil) }
                         })
                     }
                     throw CatalogCheckError.failed("revoked transaction returned success")
                 } catch PatchPackageError.applyFailed {}
                 for rule in project.rules {
-                    try check(Data(contentsOf: container.appendingPathComponent(rule.relativePath)) == original, "revocation left patched bytes instead of rolling back")
+                    try check(Data(contentsOf: containerResolver(rule.bundleID).appendingPathComponent(rule.relativePath)) == originalFor(rule), "revocation left patched bytes instead of rolling back")
                 }
                 print("[PASS] catalog \(sourceID): CryptoKit, apply/restore, missing flag recovery, existing receipt adoption, interrupted restore")
             } catch { print("[FAIL] catalog \(sourceID): \(String(reflecting: error))"); throw error }

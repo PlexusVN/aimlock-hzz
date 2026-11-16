@@ -12,8 +12,8 @@ import Foundation
         throw CatalogCheckError.failed(message)
     }
     @MainActor static func associate(_ service:FeaturePatchService,_ item:PatchItem,_ project:UUID) {
-        service.catalogApplications.associate(project,with:"catalog_\(item.id)_fixture")
-        service.catalogApplications.markApplied("catalog_\(item.id)_fixture")
+        service.catalogApplications.associate(project,with:"catalog_\(item.id)_\(item.artifactVariant ?? "legacy")")
+        service.catalogApplications.markApplied("catalog_\(item.id)_\(item.artifactVariant ?? "legacy")")
     }
     @MainActor static func queuedSessionCheck(_ kind:String)async throws {
         try Fixture.reset()
@@ -35,6 +35,222 @@ import Foundation
         try check(Fixture.downloads==0 && Fixture.applies==0 && Fixture.restores==0,"queued \(kind) changed files")
         try check(!service.patchOperationInProgress,"queued failure retained busy state")
     }
+
+    @MainActor static func targetValidationChecks()async throws {
+        func project(_ bundles:[String], declared:[String]? = nil) -> PatchProject {
+            PatchProject(name:"Target fixture",bundleIdentifiers:declared ?? bundles,
+                rules:bundles.map { PatchRule(bundleID:$0,relativePath:"Documents/shared-name",
+                                             replacementFilename:"file",replacementData:Data([7])) })
+        }
+        func accept(_ candidate:PatchProject,variant:String = "generic",_ message:String)async throws {
+            try Fixture.reset();Fixture.nextProject=candidate
+            let service=FeaturePatchService(),auth=AuthManager()
+            let item=PatchItem(id:30,name:"Targets",slug:"targets",artifactVariant:variant)
+            service.adoptVerifiedCatalogForFixture([30:[variant]])
+            try await service.applyPatch(item,auth:auth)
+            try check(Fixture.prepares==1 && Set(Fixture.preparedBundleIDs)==Set(candidate.allBundleIdentifiers),
+                      message+": preparation lost or added an application identity")
+            try check(Fixture.applies==1 && service.isPatchEnabled(item),message+": apply did not complete")
+        }
+        func reject(_ candidate:PatchProject,variant:String = "generic",_ message:String)async throws {
+            try Fixture.reset();Fixture.nextProject=candidate
+            let service=FeaturePatchService(),auth=AuthManager()
+            let item=PatchItem(id:30,name:"Targets",slug:"targets",artifactVariant:variant)
+            service.adoptVerifiedCatalogForFixture([30:[variant]])
+            let oldProject=UUID();try Fixture.establish(oldProject);associate(service,item,oldProject)
+            do { try await service.applyPatch(item,auth:auth);throw CatalogCheckError.failed(message+": accepted") }
+            catch let failure as PatchOperationError {
+                try check(failure.stage == .target,message+": did not fail at target validation")
+            }
+            try check(Fixture.prepares==0 && Fixture.applies==0 && Fixture.restores==0,
+                      message+": prepared, restored or wrote before rejecting targets")
+            try check(!service.isPatchEnabled(item) && Fixture.states[oldProject] == .applied,
+                      message+": failure lost OFF intent or changed the existing backup")
+        }
+
+        for (variant,bundle) in [("ffth","com.dts.freefireth"),("ffmax","com.dts.freefiremax"),
+                                 ("capcut","com.lemon.lvoverseas")] {
+            try await accept(project([bundle]),variant:variant,"legacy "+variant)
+            try await reject(project(["com.example.other"]),variant:variant,"legacy binding "+variant)
+        }
+        try await accept(project(["com.dts.freefireth"]),"generic known application")
+        try await accept(project(["com.example.New-App"]),"generic arbitrary application")
+        try await accept(project(["com.example.one","org.example.two"]),"generic multiple applications")
+        try await accept(project(["com.example.one","org.example.two"],declared:[]),"inferred rule identities")
+        try await accept(project(["com.example.one"],declared:["com.example.one","org.example.two"]),
+                         "declared application without a replacement rule")
+        try await accept(project((0..<256).map { "com.example.app\($0)" }),"maximum 256 applications")
+
+        for variant in ["unknown","native","mod","original",""] {
+            try await reject(project(["com.example.one"]),variant:variant,"unsupported variant "+variant)
+        }
+        for bundle in ["", "com.example..app", " com.example.app", "com.example.app ",
+                       "com.example/app", "com.example_unsafe", "com.exämple.app", "com.example.-app",
+                       UUID().uuidString, "com.example.app\n", String(repeating:"x",count:250)+".example"] {
+            try await reject(project([bundle]),"noncanonical identity "+bundle)
+        }
+        try await reject(project([]),"empty target project")
+        var declarationOnly=project(["com.example.one"]);declarationOnly.rules=[]
+        try await reject(declarationOnly,"declarations without a patch rule")
+        try await reject(project((0..<257).map { "com.example.app\($0)" }),"more than 256 applications")
+        try await reject(project(["com.example.one"],declared:["org.example.other"]),"rule not declared")
+        try await reject(project(["com.example.one"],declared:["com.example.one","com.example.one"]),
+                         "duplicate declaration")
+        var invalidDirectory=project(["com.example.one"])
+        invalidDirectory.directories=[PatchDirectory(bundleID:"org.example.other",relativePath:"Documents/new")]
+        try await reject(invalidDirectory,"directory not declared")
+        for kind in ["appGroup","systemAppGroup","system","native","Application",""] {
+            var invalid=project(["com.example.one"]);invalid.rules[0].containerKind=kind
+            try await reject(invalid,"unsupported rule container "+kind)
+            invalid=project(["com.example.one"])
+            invalid.directories=[PatchDirectory(bundleID:"com.example.one",relativePath:"Documents/new",containerKind:kind)]
+            try await reject(invalid,"unsupported directory container "+kind)
+        }
+        var explicitApplication=project(["com.example.one"])
+        explicitApplication.rules[0].containerKind="application"
+        explicitApplication.directories=[PatchDirectory(bundleID:"com.example.one",relativePath:"Documents/new",containerKind:"application")]
+        try await accept(explicitApplication,"explicit application containers")
+        for path in ["../escape","/Documents/file","Documents/../file","Documents\\file"," Documents/file"] {
+            var invalid=project(["com.example.one"]);invalid.rules[0].relativePath=path
+            try await reject(invalid,"noncanonical rule path "+path)
+        }
+        var collision=project(["com.example.one"]);collision.rules.append(collision.rules[0])
+        try await reject(collision,"duplicate application target")
+        collision=project(["com.example.one"])
+        collision.directories=[PatchDirectory(bundleID:"com.example.one",relativePath:collision.rules[0].relativePath)]
+        try await reject(collision,"file and directory target collision")
+
+        // These are the production Codable project/rule/directory types used by
+        // PatchPackageCodec's payload decoder, not simplified fixture models.
+        var supplied=explicitApplication;supplied.rules[0].containerKind="appGroup"
+        supplied.directories[0].containerKind="systemAppGroup"
+        let encoded=try PropertyListEncoder().encode(supplied)
+        let decoded=try PropertyListDecoder().decode(PatchProject.self,from:encoded)
+        try check(decoded.rules[0].containerKind=="appGroup" && decoded.directories[0].containerKind=="systemAppGroup",
+                  "package model silently discarded non-application container metadata")
+        try await reject(decoded,"decoded non-application metadata")
+        let legacyDecoded=try PropertyListDecoder().decode(PatchProject.self,from:PropertyListEncoder().encode(project(["com.example.one"])))
+        try check(legacyDecoded.rules[0].containerKind==nil,"old package without kind stopped decoding")
+    }
+
+    @MainActor static func retiredVariantChecks()async throws {
+        let old=PatchItem(id:44,name:"Original",slug:"original",artifactVariant:"ffth")
+        let current=PatchItem(id:44,name:"Generic",slug:"replacement",artifactVariant:"generic")
+        let unrelated=PatchItem(id:45,name:"Other",slug:"other",artifactVariant:"ffth")
+        let oldIdentity="catalog_44_ffth"
+        func clearPreferences() {
+            for key in Fixture.defaults.dictionaryRepresentation().keys { Fixture.defaults.removeObject(forKey:key) }
+        }
+        func seed()async throws -> UUID {
+            let initial=FeaturePatchService()
+            try await initial.applyPatch(old,auth:AuthManager())
+            return Fixture.nextProject.id
+        }
+
+        try Fixture.reset()
+        let oldID=try await seed(),receiptID=Fixture.receipts[Fixture.nextProject.id]!.id
+        clearPreferences()
+        let restarted=FeaturePatchService(),auth=AuthManager()
+        try check(restarted.patchApplicationState(current) == .off,"unverified catalog adopted retired variant")
+        let downloadsBeforeProof=Fixture.downloads
+        try await mustFail("unverified generic catalog applied") { try await restarted.applyPatch(current,auth:auth) }
+        try await mustFail("unverified generic catalog inspected a backup") { _ = try await restarted.inspectPatchRestore(current,auth:auth) }
+        try await mustFail("unverified generic catalog restored a backup") { try await restarted.restorePatch(current,auth:auth) }
+        try check(Fixture.downloads==downloadsBeforeProof && Fixture.applies==1 && Fixture.restores==0,
+                  "missing catalog proof downloaded or mutated files")
+        restarted.adoptVerifiedCatalogForFixture([44:["generic"]],revision:0)
+        try await mustFail("generic catalog proof from another session applied") { try await restarted.applyPatch(current,auth:auth) }
+        try await mustFail("generic catalog proof from another session restored") { try await restarted.restorePatch(current,auth:auth) }
+        try check(Fixture.downloads==downloadsBeforeProof && Fixture.restores==0,"stale catalog proof crossed session")
+        restarted.adoptVerifiedCatalogForFixture([44:["generic"]])
+        try check(restarted.patchApplicationState(current) == .applied,
+                  "retired variant backup inaccessible after preference loss")
+        try check(!restarted.isPatchEnabled(current),"rejected ON request lost its OFF intent after fresh proof")
+        let review=try await restarted.inspectPatchRestore(current,auth:auth)
+        try check(review.projectID==oldID && review.receiptID==receiptID,"generic OFF inspected another backup")
+        Fixture.failRestore=true
+        try await mustFail("retired OFF failure ignored") { try await restarted.restorePatch(current,auth:auth) }
+        try check(!restarted.isPatchEnabled(current) && Fixture.states[oldID] == .applied,
+                  "retired OFF failure lost intent or backup")
+        let metadata=try PropertyListSerialization.propertyList(
+            from:Data(contentsOf:Fixture.root.appendingPathComponent(".catalog-recovery.plist")),format:nil) as! [[String:Any]]
+        try check(metadata.first?["catalogIdentity"] as? String == oldIdentity &&
+                  metadata.first?["requestedEnabled"] as? Bool == false,
+                  "retired OFF was not persisted on the original durable row")
+        clearPreferences()
+        let afterOffRestart=FeaturePatchService();afterOffRestart.adoptVerifiedCatalogForFixture([44:["generic"]])
+        try check(!afterOffRestart.isPatchEnabled(current),"retired OFF intent lost across restart")
+        Fixture.failRestore=false
+        try await afterOffRestart.restorePatch(current,auth:auth)
+        try check(Fixture.restores==1 && Fixture.states[oldID] == .off,"generic OFF did not restore retired variant")
+
+        try Fixture.reset()
+        let retryID=try await seed(),retryReceipt=Fixture.receipts[Fixture.nextProject.id]!.id
+        let retry=FeaturePatchService();retry.adoptVerifiedCatalogForFixture([44:["generic"]])
+        try await retry.applyPatch(current,auth:auth)
+        try check(Fixture.applies==1 && Fixture.restores==0 && Fixture.receipts[retryID]?.id==retryReceipt,
+                  "generic same-package retry recaptured a patched baseline")
+        try check(retry.isPatchEnabled(current),"generic retry did not retain enabled intent")
+
+        try Fixture.reset()
+        let replacedID=try await seed()
+        Fixture.nextProject=PatchProject()
+        let replacementID=Fixture.nextProject.id
+        let replacement=FeaturePatchService();replacement.adoptVerifiedCatalogForFixture([44:["generic"]])
+        try await replacement.applyPatch(current,auth:auth)
+        try check(Fixture.restores==1 && Fixture.applies==2 && Fixture.states[replacedID] == .off &&
+                  Fixture.states[replacementID] == .applied,"generic replacement did not restore retired baseline first")
+
+        try Fixture.reset()
+        let changedID=try await seed()
+        Fixture.nextProject=PatchProject();Fixture.changed=true
+        let changed=FeaturePatchService();changed.adoptVerifiedCatalogForFixture([44:["generic"]])
+        try await mustFail("changed retired targets overwritten without review") { try await changed.applyPatch(current,auth:auth) }
+        try check(Fixture.restores==0 && Fixture.applies==1 && !changed.isPatchEnabled(current),
+                  "changed retired retry mutated files or ignored OFF intent")
+        let changedReview=try await changed.inspectPatchRestore(current,auth:auth)
+        try check(changedReview.projectID==changedID && !changedReview.changedPaths.isEmpty,
+                  "existing confirmation cannot review retired receipt")
+        Fixture.changed=false
+        try await changed.applyPatch(current,auth:auth,recoveryConfirmation:changedReview)
+        try check(Fixture.restores==1 && Fixture.applies==2,"confirmed retired retry did not restore then apply")
+
+        try Fixture.reset()
+        let siblingID=try await seed()
+        let sibling=FeaturePatchService();sibling.adoptVerifiedCatalogForFixture([44:["ffth","generic"]])
+        try check(sibling.patchApplicationState(current) == .off && sibling.patchApplicationState(old) == .applied,
+                  "still-published legacy sibling was stolen by generic")
+        try await mustFail("generic restore stole still-published legacy sibling") { try await sibling.restorePatch(current,auth:auth) }
+        try check(Fixture.states[siblingID] == .applied && Fixture.restores==0,"sibling restore mutated original")
+
+        try Fixture.reset()
+        let outsider=FeaturePatchService()
+        try await outsider.applyPatch(unrelated,auth:auth)
+        let outsiderID=Fixture.nextProject.id
+        outsider.adoptVerifiedCatalogForFixture([44:["generic"],45:["ffth"]])
+        try check(outsider.patchApplicationState(current) == .off,"another catalog ID was adopted")
+        try await mustFail("generic restored unrelated catalog ID") { try await outsider.restorePatch(current,auth:auth) }
+        try check(Fixture.states[outsiderID] == .applied && Fixture.restores==0,"unrelated restore mutated files")
+
+        try Fixture.reset()
+        _ = try await seed()
+        Fixture.nextProject=PatchProject()
+        Fixture.nextProject.bundleIdentifiers=["com.dts.freefiremax"]
+        Fixture.nextProject.rules[0].bundleID="com.dts.freefiremax"
+        let second=FeaturePatchService()
+        try await second.applyPatch(PatchItem(id:44,name:"Second",slug:"second",artifactVariant:"ffmax"),auth:auth)
+        clearPreferences()
+        let ambiguous=FeaturePatchService();ambiguous.adoptVerifiedCatalogForFixture([44:["generic"]])
+        let downloads=Fixture.downloads,applies=Fixture.applies
+        try check(ambiguous.patchApplicationState(current) == .recoveryRequired && !ambiguous.isPatchEnabled(current),
+                  "multiple retired active backups selected arbitrarily")
+        try await mustFail("ambiguous retired apply selected a backup") { try await ambiguous.applyPatch(current,auth:auth) }
+        try await mustFail("ambiguous retired restore selected a backup") { try await ambiguous.restorePatch(current,auth:auth) }
+        try check(Fixture.downloads==downloads && Fixture.applies==applies && Fixture.restores==0,
+                  "ambiguous retired operation downloaded or changed files")
+        ambiguous.adoptVerifiedCatalogForFixture([:])
+        try check(ambiguous.patchApplicationState(current) == .off,"cleared catalog proof kept retired aliases")
+    }
     @MainActor static func main()async throws {
         let item=PatchItem(id:1,name:"Feature\nOne",slug:"fixture")
         try Fixture.reset()
@@ -43,7 +259,7 @@ import Foundation
         let oldReceipt=Fixture.receipts[oldID]
         Fixture.failApply=true
         try await mustFail("failed replacement ignored") { try await service.applyPatch(item,auth:auth) }
-        try check(service.catalogApplications.projectID(for:"catalog_1_fixture")==oldID,"active association replaced")
+        try check(service.catalogApplications.projectID(for:"catalog_1_ffth")==oldID,"active association replaced")
         try check(Fixture.receipts[oldID]==oldReceipt && Fixture.restores==1,"replacement failed without safely retiring or retaining the old backup")
         try check(!service.isPatchEnabled(item),"failed ON request remained visually enabled")
         try await service.restorePatch(item,auth:auth)
@@ -55,13 +271,13 @@ import Foundation
         try await mustFail("incoming project already active under another item was adopted") {
             try await incoming.applyPatch(item,auth:auth)
         }
-        try check(Fixture.applies==0 && incoming.catalogApplications.projectID(for:"catalog_1_fixture")==nil,
+        try check(Fixture.applies==0 && incoming.catalogApplications.projectID(for:"catalog_1_ffth")==nil,
                   "incoming active project mutated a new catalog association")
 
         try Fixture.reset()
         let first=FeaturePatchService();Fixture.failApply=true
         try await mustFail("pre-journal failure ignored") { try await first.applyPatch(item,auth:auth) }
-        try check(first.catalogApplications.projectID(for:"catalog_1_fixture")==nil,"uncommitted association not removed")
+        try check(first.catalogApplications.projectID(for:"catalog_1_ffth")==nil,"uncommitted association not removed")
         try check(first.recoveryItems.isEmpty,"harmless pre-journal metadata became an active transaction")
         Fixture.failApply=false
         try await first.applyPatch(item,auth:auth)
@@ -105,8 +321,8 @@ import Foundation
         let ambiguous=FeaturePatchService(),a=UUID(),b=UUID()
         try Fixture.establish(a);try Fixture.establish(b);associate(ambiguous,item,a)
         let metadata:[[String:Any]]=[
-            ["projectID":a.uuidString,"title":"A","catalogIdentity":"catalog_1_fixture"],
-            ["projectID":b.uuidString,"title":"B","catalogIdentity":"catalog_1_fixture"]]
+            ["projectID":a.uuidString,"title":"A","catalogIdentity":"catalog_1_ffth"],
+            ["projectID":b.uuidString,"title":"B","catalogIdentity":"catalog_1_ffth"]]
         let encoded=try PropertyListSerialization.data(fromPropertyList:metadata,format:.binary,options:0)
         try encoded.write(to:Fixture.root.appendingPathComponent(".catalog-recovery.plist"))
         ambiguous.refreshRecoveryItems()
@@ -127,7 +343,7 @@ import Foundation
         try Fixture.reset()
         let partial=FeaturePatchService();Fixture.partialApply=true
         try await mustFail("partial application ignored") { try await partial.applyPatch(item,auth:auth) }
-        try check(partial.catalogApplications.projectID(for:"catalog_1_fixture")==Fixture.nextProject.id,"partial journal lost association")
+        try check(partial.catalogApplications.projectID(for:"catalog_1_ffth")==Fixture.nextProject.id,"partial journal lost association")
         try check(partial.recoveryItems.first?.state == .recoveryRequired,"partial write advertised OFF")
 
         try Fixture.reset()
@@ -136,7 +352,7 @@ import Foundation
         try await mustFail("default OFF overwrote changed targets") { try await changed.restorePatch(item,auth:auth) }
         try check(Fixture.restores==0 && changed.isPatchApplied(item),"changed-target refusal lost ON or restored data")
         let review=try await changed.inspectPatchRestore(item,auth:auth)
-        try check(review.changedPaths==["com.fixture.app/Documents/file"],"inspection did not provide changed paths")
+        try check(review.changedPaths==["com.dts.freefireth/Documents/file"],"inspection did not provide changed paths")
         Fixture.snapshot=Data([9,8,7])
         try await mustFail("stale inspected bytes accepted") { try await changed.restorePatch(item,auth:auth,confirmation:review) }
         try check(Fixture.restores==0,"stale review wrote files")
@@ -264,9 +480,9 @@ import Foundation
         try Fixture.reset()
         let legacy=FeaturePatchService(),legacyProject=UUID()
         try Fixture.establish(legacyProject);associate(legacy,item,legacyProject)
-        Fixture.defaults.set(false,forKey:"patch_requested_enabled_catalog_1_fixture")
+        Fixture.defaults.set(false,forKey:"patch_requested_enabled_catalog_1_ffth")
         try check(!legacy.isPatchEnabled(item),"legacy unbound OFF was reset during migration")
-        let legacyBinding=Fixture.defaults.string(forKey:"patch_requested_binding_catalog_1_fixture")
+        let legacyBinding=Fixture.defaults.string(forKey:"patch_requested_binding_catalog_1_ffth")
         try check(legacyBinding?.contains(Fixture.receipts[legacyProject]!.id.uuidString)==true,
                   "legacy OFF was not bound to its current journal")
         try Fixture.establish(legacyProject)
@@ -276,14 +492,14 @@ import Foundation
         try Fixture.reset()
         let airLift=FeaturePatchService(),airLiftProject=UUID()
         let firstAirLift=PatchEngineApplicationRecord(projectID:airLiftProject,engine:.airLift,
-            baseline:.unavailable,targetKeys:["com.fixture.app\0Documents/file"],phase:.applied,totalBatches:1)
+            baseline:.unavailable,targetKeys:["com.dts.freefireth\0Documents/file"],phase:.applied,totalBatches:1)
         try Fixture.store.save(firstAirLift);associate(airLift,item,airLiftProject)
         airLift.recordPatchOffFailure(item,requestedRevision:auth.authenticationRevision,auth:auth)
         try check(!airLift.isPatchEnabled(item),"AirLift operation OFF was not retained")
         try Fixture.store.save(firstAirLift)
         try check(!FeaturePatchService().isPatchEnabled(item),"same AirLift operation lost OFF after restart")
         let secondAirLift=PatchEngineApplicationRecord(projectID:airLiftProject,engine:.airLift,
-            baseline:.unavailable,targetKeys:["com.fixture.app\0Documents/file"],phase:.applied,totalBatches:1)
+            baseline:.unavailable,targetKeys:["com.dts.freefireth\0Documents/file"],phase:.applied,totalBatches:1)
         try Fixture.store.save(secondAirLift)
         try check(airLift.isPatchEnabled(item),"old AirLift OFF leaked into a different operation")
         try check(FeaturePatchService().isPatchEnabled(item),"persisted AirLift OFF leaked into a different operation")
@@ -340,10 +556,10 @@ import Foundation
         let refOFF=FeaturePatchService(),refProject=UUID()
         try Fixture.establish(refProject);associate(refOFF,item,refProject)
         let refBinding=refProject.uuidString+":journal:"+Fixture.receipts[refProject]!.id.uuidString
-        Fixture.defaults.set(refBinding,forKey:"patch_applied_catalog_1_fixture_disabledBinding")
-        Fixture.defaults.set(true,forKey:"patch_applied_catalog_1_fixture_recovery")
+        Fixture.defaults.set(refBinding,forKey:"patch_applied_catalog_1_ffth_disabledBinding")
+        Fixture.defaults.set(true,forKey:"patch_applied_catalog_1_ffth_recovery")
         try check(!refOFF.isPatchEnabled(item),"reference OFF binding displayed ON")
-        try check(Fixture.defaults.string(forKey:"patch_requested_binding_catalog_1_fixture")==refBinding,
+        try check(Fixture.defaults.string(forKey:"patch_requested_binding_catalog_1_ffth")==refBinding,
                   "reference recovery preference prevented bound-OFF migration")
         try check(FeaturePatchService().isPatchEnabled(item)==false,"reference OFF migration did not survive restart")
         for key in Fixture.defaults.dictionaryRepresentation().keys { Fixture.defaults.removeObject(forKey:key) }
@@ -357,31 +573,31 @@ import Foundation
         let wrongReference=FeaturePatchService(),wrongProject=UUID()
         try Fixture.establish(wrongProject);associate(wrongReference,item,wrongProject)
         Fixture.defaults.set(wrongProject.uuidString+":journal:"+UUID().uuidString,
-                             forKey:"patch_applied_catalog_1_fixture_disabledBinding")
+                             forKey:"patch_applied_catalog_1_ffth_disabledBinding")
         try check(wrongReference.isPatchEnabled(item),"stale reference OFF was moved to a new receipt")
 
         try Fixture.reset()
         let slugReference=FeaturePatchService(),slugProject=UUID()
         try Fixture.establish(slugProject)
-        slugReference.catalogApplications.associate(slugProject,with:"fixture_fixture")
-        slugReference.catalogApplications.markApplied("fixture_fixture")
+        slugReference.catalogApplications.associate(slugProject,with:"fixture_ffth")
+        slugReference.catalogApplications.markApplied("fixture_ffth")
         let slugBinding=slugProject.uuidString+":journal:"+Fixture.receipts[slugProject]!.id.uuidString
-        Fixture.defaults.set(slugBinding,forKey:"patch_applied_fixture_fixture_disabledBinding")
+        Fixture.defaults.set(slugBinding,forKey:"patch_applied_fixture_ffth_disabledBinding")
         try check(!slugReference.isPatchEnabled(item),"slug reference OFF did not migrate to stable catalog identity")
-        try check(slugReference.catalogApplications.projectID(for:"catalog_1_fixture")==slugProject,"reference migration lost project association")
+        try check(slugReference.catalogApplications.projectID(for:"catalog_1_ffth")==slugProject,"reference migration lost project association")
         try Fixture.establish(slugProject)
         try check(FeaturePatchService().isPatchEnabled(item),"old slug OFF leaked to a later transaction")
 
         try Fixture.reset()
         let referenceAirLift=FeaturePatchService(),referenceAirLiftID=UUID()
         let referenceOperation=PatchEngineApplicationRecord(projectID:referenceAirLiftID,engine:.airLift,
-            baseline:.unavailable,targetKeys:["com.fixture.app\0Documents/file"],phase:.applied,totalBatches:1)
+            baseline:.unavailable,targetKeys:["com.dts.freefireth\0Documents/file"],phase:.applied,totalBatches:1)
         try Fixture.store.save(referenceOperation);associate(referenceAirLift,item,referenceAirLiftID)
         let operationBinding=referenceAirLiftID.uuidString+":operation:"+referenceOperation.operationID.uuidString
-        Fixture.defaults.set(operationBinding,forKey:"patch_applied_catalog_1_fixture_disabledBinding")
+        Fixture.defaults.set(operationBinding,forKey:"patch_applied_catalog_1_ffth_disabledBinding")
         try check(!referenceAirLift.isPatchEnabled(item),"reference AirLift operation OFF did not migrate")
         let nextOperation=PatchEngineApplicationRecord(projectID:referenceAirLiftID,engine:.airLift,
-            baseline:.unavailable,targetKeys:["com.fixture.app\0Documents/file"],phase:.applied,totalBatches:1)
+            baseline:.unavailable,targetKeys:["com.dts.freefireth\0Documents/file"],phase:.applied,totalBatches:1)
         try Fixture.store.save(nextOperation)
         try check(FeaturePatchService().isPatchEnabled(item),"reference AirLift OFF migrated to another operation")
 
@@ -407,6 +623,9 @@ import Foundation
         inventory.refreshRecoveryItems()
         try check(inventory.recoveryItems.count==1 && inventory.recoveryInventoryError != nil,"temporarily unreadable storage became empty/OFF")
         try FileManager.default.removeItem(at:Fixture.root);try FileManager.default.moveItem(at:saved,to:Fixture.root)
-        print("Catalog recovery production methods: \(checks) checks passed")
+        print("Catalog recovery prior behavior: \(checks) checks passed")
+        try await targetValidationChecks()
+        try await retiredVariantChecks()
+        print("Catalog recovery and package targets production methods: \(checks) checks passed")
     }
 }

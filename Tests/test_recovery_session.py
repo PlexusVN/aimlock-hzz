@@ -86,7 +86,9 @@ extension ProtectedAuthContext { var hwid: String { "hardware-A" } }
     }
     private func ensureReleaseLease() async throws {}
     private func post(_ route:String, body:[String:Any],signed:Bool,purpose:String) async throws -> (Data,String) {
-        guard route == "/api/v2/artifacts/sync", signed else { throw ProtectedDownloadError.invalidResponse }
+        guard route == "/api/v2/artifacts/sync", signed, purpose == "artifact-sync",
+              body.count == 1, body["package_targets"] as? String == "bundle-identifiers-v1"
+        else { throw ProtectedDownloadError.invalidResponse }
         catalogs += 1
         if !catalogFailures.isEmpty, let error=catalogFailures.removeFirst() { throw error }
         return (Data(),"")

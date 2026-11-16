@@ -17,5 +17,16 @@ import Foundation
         precondition(!AppSecurityConfiguration.permitsCertificatePins([
             "69QQQOS7PsdCyeOB0x7ypBpItmhclufO88HfbNQzHJk="]))
         print("[PASS] current leaf/YE2 renewal accepted; unknown/user/root-only chain denied")
+        for variant in ["ffth", "ffmax", "capcut", "generic", "unknown", "", "Generic", "ffth "] {
+            for kind in ["package", "mod", "original", "unknown", "", "Package"] {
+                let expected = (kind == "package" && ["ffth", "ffmax", "capcut", "generic"].contains(variant))
+                    || (["mod", "original"].contains(kind) && ["ffth", "ffmax"].contains(variant))
+                precondition(AppSecurityConfiguration.supportsProtectedArtifact(variant: variant, kind: kind) == expected,
+                             "Invalid protected artifact support: \(variant)/\(kind)")
+            }
+        }
+        precondition(AppSecurityConfiguration.protectedBundleID(forVariant: "generic") == nil,
+                     "Generic protocol metadata must not invent a fixed Bundle ID")
+        print("[PASS] generic is package-only; native variants and legacy Bundle ID mapping remain bounded")
     }
 }

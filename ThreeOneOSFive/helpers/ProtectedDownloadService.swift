@@ -635,8 +635,9 @@ final class ProtectedDownloadService: ObservableObject {
     /// Catalog sync is read-only. A pinned-TLS expired-session rejection permits
     /// ONE fresh session/proof/nonce retry. One-use grants/content are never replayed.
     private func syncCatalogWithSessionRetry(auth: AuthManager) async throws -> Data {
+        let body: [String: Any] = ["package_targets": "bundle-identifiers-v1"]
         do {
-            return try await post("/api/v2/artifacts/sync", body: [:], signed: true, purpose: "artifact-sync").0
+            return try await post("/api/v2/artifacts/sync", body: body, signed: true, purpose: "artifact-sync").0
         } catch {
             let expiredSession: Bool
             if case ProtectedDownloadError.rejected(let code) = error {
@@ -648,7 +649,7 @@ final class ProtectedDownloadService: ObservableObject {
             clearSession()
             try await ensureSession(auth: auth)
             try await ensureReleaseLease()
-            return try await post("/api/v2/artifacts/sync", body: [:], signed: true, purpose: "artifact-sync").0
+            return try await post("/api/v2/artifacts/sync", body: body, signed: true, purpose: "artifact-sync").0
         }
     }
 
@@ -818,9 +819,7 @@ final class ProtectedDownloadService: ObservableObject {
     private func downloadArtifact(_ descriptor: ProtectedArtifactDescriptor,
                                   auth: AuthManager) async throws -> ProtectedCodePatchDownload {
         guard UUID(uuidString: descriptor.artifactID) != nil,
-              ["package", "mod", "original"].contains(descriptor.kind),
-              AppSecurityConfiguration.protectedBundleID(forVariant: descriptor.variant) != nil,
-              descriptor.variant != "capcut" || descriptor.kind == "package" else {
+              AppSecurityConfiguration.supportsProtectedArtifact(variant: descriptor.variant, kind: descriptor.kind) else {
             throw ProtectedDownloadError.invalidResponse
         }
         let initialLicenseDigest = licenseDigest
