@@ -29,6 +29,8 @@ struct PatchRestoreConfirmation { let authRevision: UInt64 = 1 }
     private func endPatchOperation() {}
     private func patchStorageSlug(_ patch: PatchItem) -> String { "fixture" }
     private func setRequestedEnabled(_ value: Bool, identity: String) {}
+    private func requirePatchEnableAllowed(_ patch: PatchItem,
+                                           confirmation: PatchRestoreConfirmation? = nil) throws {}
     private func applyPatchInOperation(_ patch: PatchItem, auth: AuthManager, operationID: UUID,
                                        expectedRevision: UInt64,
                                        recoveryConfirmation: PatchRestoreConfirmation? = nil) async throws {

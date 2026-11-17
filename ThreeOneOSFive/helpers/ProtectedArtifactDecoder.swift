@@ -22,6 +22,40 @@ enum ProtectedArtifactError: LocalizedError {
     }
 }
 
+// An HTTP Date is admitted only from SecureAPIClient's system-trusted and
+// certificate-pinned response. Account for the complete round trip and the
+// header's one-second precision conservatively; this can shorten a grant's
+// usable lifetime, never extend its server expiry.
+struct ProtectedResponseTime {
+    private let upperBoundAtReceipt: TimeInterval
+    private let receivedAt: TimeInterval
+
+    init?(serverDate: Date, requestStartedAt: TimeInterval, receivedAt: TimeInterval) {
+        let roundTrip = receivedAt - requestStartedAt
+        guard serverDate.timeIntervalSince1970.isFinite,
+              requestStartedAt.isFinite, receivedAt.isFinite,
+              roundTrip >= 0, roundTrip <= 180 else { return nil }
+        upperBoundAtReceipt = serverDate.timeIntervalSince1970 + roundTrip + 1
+        self.receivedAt = receivedAt
+    }
+
+    func verificationDate(at uptime: TimeInterval) -> Date? {
+        let elapsed = uptime - receivedAt
+        guard uptime.isFinite, elapsed >= 0, elapsed <= 300 else { return nil }
+        return Date(timeIntervalSince1970: upperBoundAtReceipt + elapsed)
+    }
+
+    static func httpDate(_ value: String?) -> Date? {
+        guard let value, value.utf8.count <= 64 else { return nil }
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.timeZone = TimeZone(secondsFromGMT: 0)
+        formatter.dateFormat = "EEE',' dd MMM yyyy HH':'mm':'ss z"
+        formatter.isLenient = false
+        return formatter.date(from: value)
+    }
+}
+
 struct ProtectedArtifactManifest: Codable {
     let artifactId: String
     let releaseId: String

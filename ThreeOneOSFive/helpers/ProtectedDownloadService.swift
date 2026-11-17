@@ -210,6 +210,7 @@ final class ProtectedDownloadService: ObservableObject {
     private var currentAuthContext: ProtectedAuthContext?
     private var contextEpoch: UInt64 = 0
     private var releaseLease = ProtectedReleaseLease()
+    private var lastResponseTime: ProtectedResponseTime?
 
     private func endpoint(_ path: String) throws -> URL {
         guard let url = URL(string: origin + path) else { throw SecureAPIError.invalidEndpoint }
@@ -255,7 +256,9 @@ final class ProtectedDownloadService: ObservableObject {
             nonce = try RequestProofService.shared.generateNonce()
             request.setValue(nonce, forHTTPHeaderField: "X-Astra-Nonce")
         }
+        let requestStartedAt = ProcessInfo.processInfo.systemUptime
         let (data, response) = try await SecureAPIClient.shared.data(for: request)
+        let receivedAt = ProcessInfo.processInfo.systemUptime
         if detachedSession == nil {
             guard epoch == contextEpoch else { throw CancellationError() }
             try authContext?.validate()
@@ -279,6 +282,9 @@ final class ProtectedDownloadService: ObservableObject {
             }
             throw ProtectedDownloadError.rejected("HTTP_\(response.statusCode)")
         }
+        lastResponseTime = ProtectedResponseTime.httpDate(response.value(forHTTPHeaderField: "Date"))
+            .flatMap { ProtectedResponseTime(serverDate: $0,
+                requestStartedAt: requestStartedAt, receivedAt: receivedAt) }
         let payload = data
         if detachedSession == nil && purpose != nil && (path.hasPrefix("/api/v2/artifacts/") ||
             path == "/api/v2/novax/session/open" || path == "/api/v2/novax/session/renew") {
@@ -306,6 +312,7 @@ final class ProtectedDownloadService: ObservableObject {
         contextEpoch &+= 1
         clearSession(); licenseDigest = ""; accessNotice = nil
         identity = nil; currentAuthContext = nil
+        lastResponseTime = nil
     }
 
     /// Snapshot synchronously at the user's logout action. The queued request
@@ -832,6 +839,7 @@ final class ProtectedDownloadService: ObservableObject {
         }
         let (contentData, nonce) = try await post("/api/v2/artifacts/\(descriptor.artifactID)/content",
             body: ["grant_id": grantID], signed: true, purpose: nil)
+        let contentTime = lastResponseTime
         guard contentData.count <= 72 * 1024 * 1024 else { throw ProtectedDownloadError.invalidResponse }
         let content = try dictionary(contentData)
         guard let manifest = content["signed_manifest"], let grant = content["signed_grant"],
@@ -856,7 +864,8 @@ final class ProtectedDownloadService: ObservableObject {
         try await AppIntegrityRuntime.shared.requireAllowed(force:true)
         let plaintext = try decoder.decrypt(signedManifest: manifestData,
             signedGrant: grantDataJSON, ciphertext: ciphertext, recipientID: deviceID, sessionID: sessionID,
-            requestNonce: nonce, expectedArtifactID: descriptor.artifactID, expectedGrantID: grantID)
+            requestNonce: nonce, expectedArtifactID: descriptor.artifactID, expectedGrantID: grantID,
+            now: contentTime?.verificationDate(at: ProcessInfo.processInfo.systemUptime) ?? Date())
         try await AppIntegrityRuntime.shared.requireAllowed(force:true)
         try requireCurrentLicense(auth)
         guard licenseDigest == initialLicenseDigest,

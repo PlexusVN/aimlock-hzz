@@ -17,6 +17,7 @@ METHODS = [
     'private func activeCatalogProjectIDs(',
     'private func catalogLookupIdentities(',
     'private func requireCurrentCatalogForGeneric(',
+    'private func requirePatchEnableAllowed(',
     'private func restorePatchInOperation(', 'private func restoreReceipt(',
     'private func inspectProjectRestore(', 'private func restoreProjectInOperation(',
     'private func beginPatchOperation(', 'private func endPatchOperation(',

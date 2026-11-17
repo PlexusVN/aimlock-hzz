@@ -1,3 +1,7 @@
+## Build 2.4 (44): Đồng bộ sửa lỗi Astra về thời gian grant và recovery ON/OFF
+
+Đồng bộ kiểm tra thời gian phản hồi HTTPS bằng HTTP Date + uptime, và chặn bật lại khi lần OFF trước chưa khôi phục xong. Existing review sheet vẫn là đường xác nhận recovery. Xem [báo cáo đồng bộ Astra 17/11/2026](docs/ASTRA_SYNC_20261117.md).
+
 ## Build 2.4 (43): Đồng bộ package tổng quát với Auth
 
 App khai báo hỗ trợ package tổng quát trong request sync đã ký, nhận manifest generic và xác minh các ứng dụng đích trong nội dung gói. Gói legacy vẫn tương thích. Xem [thay đổi và kiểm chứng](docs/GENERIC_PACKAGES_43.md).

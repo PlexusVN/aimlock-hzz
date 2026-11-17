@@ -68,8 +68,35 @@ struct ProtectedArtifactSelfCheck {
         }
         return result
     }
+
+    static func checkResponseTime() throws {
+        let server = Date(timeIntervalSince1970: 1_700_000_000)
+        let sample = try requireResponseTime(serverDate: server, started: 100, received: 102)
+        try require(abs(sample.timeIntervalSince1970 - 1_700_000_003) < 0.001,
+                    "trusted server date includes conservative RTT/header precision")
+        try require(abs((try requireResponseTime(serverDate: server, started: 100, received: 102,
+                                                 uptime: 105)).timeIntervalSince1970 - 1_700_000_006) < 0.001,
+                    "verification date advances from monotonic uptime")
+        try require(ProtectedResponseTime.httpDate("Wed, 15 Nov 2023 10:00:00 GMT") != nil,
+                    "valid HTTP date parses")
+        try require(ProtectedResponseTime.httpDate("not-a-date") == nil,
+                    "invalid HTTP date is ignored")
+        try require(ProtectedResponseTime.httpDate(String(repeating: "x", count: 65)) == nil,
+                    "oversized HTTP date is ignored")
+    }
+
+    private static func requireResponseTime(serverDate: Date, started: TimeInterval,
+                                            received: TimeInterval, uptime: TimeInterval = 102) throws -> Date {
+        guard let sample = ProtectedResponseTime(serverDate: serverDate,
+                requestStartedAt: started, receivedAt: received),
+              let verified = sample.verificationDate(at: uptime) else {
+            throw SelfCheckFailure.failed("response time sample")
+        }
+        return verified
+    }
     @MainActor
     static func main() async throws {
+        try checkResponseTime()
         try require(AppSecurityConfiguration.protectedBundleID(forVariant: "ffth") == "com.dts.freefireth", "FFTH apply target")
         try require(AppSecurityConfiguration.protectedBundleID(forVariant: "ffmax") == "com.dts.freefiremax", "FFMAX apply target")
         try require(AppSecurityConfiguration.protectedBundleID(forVariant: "capcut") == "com.lemon.lvoverseas", "CapCut apply target")

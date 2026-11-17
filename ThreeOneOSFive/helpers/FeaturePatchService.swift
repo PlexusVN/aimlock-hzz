@@ -628,9 +628,14 @@ final class FeaturePatchService: ObservableObject {
         if let recoveryConfirmation, recoveryConfirmation.authRevision != auth.authenticationRevision {
             throw PatchRestoreError.confirmationExpired
         }
+        guard auth.authState == .verified else { throw FeaturePatchError.notAuthenticated }
+        // A failed OFF must remain a recovery state. Do not let a later ON tap
+        // adopt the old receipt merely because the current bytes happen to look
+        // applied; the existing restore review is the only path that can clear
+        // this binding safely.
+        try requirePatchEnableAllowed(patch, confirmation: recoveryConfirmation)
         let requestedIdentity = patchStorageSlug(patch)
         setRequestedEnabled(false, identity: requestedIdentity)
-        guard auth.authState == .verified else { throw FeaturePatchError.notAuthenticated }
         let requestedAuthRevision = auth.authenticationRevision
         beginPatchOperation()
         defer { endPatchOperation() }
@@ -971,6 +976,30 @@ final class FeaturePatchService: ObservableObject {
         guard verifiedCatalogAuthRevision == revision,
               verifiedCatalogVariantsByPatchID[patch.id]?.contains("generic") == true else {
             throw ProtectedDownloadError.invalidResponse
+        }
+    }
+
+    private func requirePatchEnableAllowed(_ patch: PatchItem,
+                                           confirmation: PatchRestoreConfirmation? = nil) throws {
+        // The existing review sheet is the explicit recovery authorization for
+        // a pending OFF; later code still binds its receipt, snapshot and auth
+        // revision before any write.
+        if confirmation != nil { return }
+        let identity = patchStorageSlug(patch)
+        let activeIDs = try activeCatalogProjectIDs(for: identity)
+        guard activeIDs.count <= 1 else { throw PatchRestoreError.recoveryRequired }
+        guard let projectID = activeIDs.first else { return }
+        let state = StorageEngineCoordinator.shared.projectApplicationState(projectID)
+        if state == .recoveryRequired {
+            throw PatchRestoreError.disabledPendingRestore
+        }
+        guard state == .applied else { return }
+        let metadata = try? readRecoveryMetadata().first {
+            catalogLookupIdentities(for: identity).contains($0.catalogIdentity) && $0.projectID == projectID
+        }
+        if requestedStateValue(projectID: projectID, identity: metadata?.catalogIdentity ?? identity,
+                               metadata: metadata) == false {
+            throw PatchRestoreError.disabledPendingRestore
         }
     }
 
@@ -2141,6 +2170,7 @@ enum PatchRestoreError: LocalizedError {
     case recoveryRequired
     case confirmationExpired
     case retryNeedsRecovery(String)
+    case disabledPendingRestore
 
     static func requiresRestoreReview(_ error: Error) -> Bool {
         var cause = error
@@ -2149,6 +2179,7 @@ enum PatchRestoreError: LocalizedError {
             cause = wrapped.underlying
         }
         if case .retryNeedsRecovery = cause as? PatchRestoreError { return true }
+        if case .disabledPendingRestore = cause as? PatchRestoreError { return true }
         return false
     }
     var errorDescription: String? {
@@ -2163,6 +2194,8 @@ enum PatchRestoreError: LocalizedError {
             return "Dữ liệu hoặc phiên đăng nhập đã thay đổi từ lúc kiểm tra. Hãy kiểm tra lại bản khôi phục trước khi xác nhận."
         case .retryNeedsRecovery(let detail):
             return "Chưa thể bật lại vì lần khôi phục trước chưa hoàn tất. \(detail)"
+        case .disabledPendingRestore:
+            return "Chưa thể bật lại: lần tắt trước chưa khôi phục xong. Hãy mở mục khôi phục và hoàn tất việc trả lại bản gốc trước."
         }
     }
 }

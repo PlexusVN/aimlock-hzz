@@ -410,10 +410,16 @@ import Foundation
         let afterOffRestart=FeaturePatchService()
         try check(!afterOffRestart.isPatchEnabled(item),"failed OFF was not recovered from durable intent metadata after preference loss")
         Fixture.failRestore=false
+        try await mustFail("ON after failed OFF bypassed pending recovery") { try await afterOffRestart.applyPatch(item,auth:auth) }
+        try check(!afterOffRestart.isPatchEnabled(item) && Fixture.applies==originalApplies,
+                  "blocked ON after failed OFF changed application or intent")
+        try await afterOffRestart.restorePatch(item,auth:auth)
         try await afterOffRestart.applyPatch(item,auth:auth)
-        try check(afterOffRestart.isPatchEnabled(item) && Fixture.applies==originalApplies,
-                  "ON after failed OFF did not adopt the verified existing application")
-        try check(Fixture.receipts[originalProject]==originalReceipt,"ON retry created a backup from patched bytes")
+        try check(afterOffRestart.isPatchEnabled(item) && Fixture.applies==originalApplies+1,
+                  "explicit restore did not clear pending recovery before ON")
+        try check(Fixture.receipts[originalProject] != originalReceipt &&
+                  FileManager.default.fileExists(atPath: originalReceipt.journalURL.path),
+                  "explicit restore/reapply did not create a new receipt while retaining the old journal")
 
         // Cancelling the changed-file review does not issue OFF. A real
         // noncancel inspection error can record OFF without touching targets.
@@ -428,10 +434,14 @@ import Foundation
         try check(!afterOffRestart.isPatchEnabled(item) && Fixture.states[originalProject] == .applied,
                   "inspection failure did not separate OFF intent from real file state")
         Fixture.failInspect=false
+        let restoresBeforeBlocked = Fixture.restores
         try await mustFail("ON retry force-restored changed game files") { try await afterOffRestart.applyPatch(item,auth:auth) }
-        try check(Fixture.restores==0 && Fixture.receipts[originalProject]==originalReceipt && !afterOffRestart.isPatchEnabled(item),
+        let currentReceipt=Fixture.receipts[originalProject]!
+        try check(Fixture.restores==restoresBeforeBlocked && Fixture.receipts[originalProject]==currentReceipt &&
+                  currentReceipt.id != originalReceipt.id && !afterOffRestart.isPatchEnabled(item),
                   "blocked ON retry destroyed recovery evidence or silently forced restoration")
         Fixture.changed=false
+        try await afterOffRestart.restorePatch(item,auth:auth)
         try await afterOffRestart.applyPatch(item,auth:auth)
         auth.authenticationRevision += 1
         afterOffRestart.recordPatchOffFailure(item,requestedRevision:inspectionRevision,auth:auth)
@@ -443,8 +453,9 @@ import Foundation
         try await afterOffRestart.applyPatch(item,auth:auth)
         try check(Fixture.states[originalProject] == .off && Fixture.states[updatedProject] == .applied,
                   "updated project did not safely restore previous history before applying")
-        try check(Fixture.receipts[originalProject]==originalReceipt && Fixture.applies==originalApplies+1,
-                  "updated project overwrote the original backup or recaptured twice")
+        try check(Fixture.receipts[originalProject] != nil &&
+                  FileManager.default.fileExists(atPath: originalReceipt.journalURL.path),
+                  "updated project overwrote or discarded the original backup")
 
         let recoveryRetry=afterOffRestart.recoveryItems.first { $0.projectID==updatedProject }!
         Fixture.failRestore=true
