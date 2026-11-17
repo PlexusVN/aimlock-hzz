@@ -63,6 +63,7 @@ enum SecureAPIError: Error { case invalidEndpoint }
 }
 '''
 parts = [prefix, section('enum ProtectedDownloadError:', '@MainActor'),
+         section('struct ProtectedResponseTime {', 'struct ProtectedArtifactManifest'),
          section('@MainActor\nprivate final class ProtectedAuthContext','private struct ProtectedArtifactDescriptor'),
          section('private struct ProtectedArtifactDescriptor','// BEGIN RECOVERY CHALLENGE CONTRACT'),
          section('// BEGIN RECOVERY CHALLENGE CONTRACT','// END RECOVERY CHALLENGE CONTRACT'),
@@ -84,6 +85,7 @@ parts.append(r'''
     private var sessionID = "", sessionToken = ""
     private var sessionExpiry = Date.distantPast
     private var releaseLease = ProtectedReleaseLease()
+    private var lastResponseTime: ProtectedResponseTime?
     private let scopedBoundary: (String) throws -> DeviceIdentityService
     private let legacyBoundary: () -> DeviceIdentityService
     private let recoveryBoundary: (String) throws -> DeviceIdentityService
