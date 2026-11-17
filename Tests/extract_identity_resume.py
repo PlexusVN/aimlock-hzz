@@ -5,9 +5,14 @@ from pathlib import Path
 import sys
 root = Path(sys.argv[1])
 source = (root / 'ProtectedDownloadService.swift').read_text(encoding='utf-8')
+decoder_source = (root / 'ProtectedArtifactDecoder.swift').read_text(encoding='utf-8')
 def section(start, end):
     i = source.index(start)
     return source[i:source.index(end, i)]
+
+def decoder_section(start, end):
+    i = decoder_source.index(start)
+    return decoder_source[i:decoder_source.index(end, i)]
 prefix = r'''import Foundation
 import CryptoKit
 
@@ -63,7 +68,7 @@ enum SecureAPIError: Error { case invalidEndpoint }
 }
 '''
 parts = [prefix, section('enum ProtectedDownloadError:', '@MainActor'),
-         section('struct ProtectedResponseTime {', 'struct ProtectedArtifactManifest'),
+         decoder_section('struct ProtectedResponseTime {', 'struct ProtectedArtifactManifest'),
          section('@MainActor\nprivate final class ProtectedAuthContext','private struct ProtectedArtifactDescriptor'),
          section('private struct ProtectedArtifactDescriptor','// BEGIN RECOVERY CHALLENGE CONTRACT'),
          section('// BEGIN RECOVERY CHALLENGE CONTRACT','// END RECOVERY CHALLENGE CONTRACT'),
