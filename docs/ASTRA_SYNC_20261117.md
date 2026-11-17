@@ -13,6 +13,10 @@ Hai khoảng cách có bằng chứng được đồng bộ:
 
 Các sửa đã giữ nguyên auth revision, grant/session/nonce, chữ ký RSA, ECDH/HKDF/AES-GCM, hash, TLS pins, server/domain/product secret và thứ tự 3105 → worse_query → AirLift. Không copy cấu hình Astra hoặc namespace kỹ thuật mù quáng.
 
+Package target tùy ý của Astra build 39 đã có trong Aimlock build 43 dưới contract `generic` của Auth, gồm nhiều application Bundle ID và lưu giữ recovery alias. Không đổi sang tên variant `bundle:<BundleID>` của Astra để giữ đồng bộ với backend SQLite đã triển khai.
+
+Astra còn có một mô hình progress/cancel theo từng stage cho catalog và patch. Aimlock đang dùng operation state/action task riêng của giao diện hiện tại; luồng busy, cancellation và auth revision đã được kiểm tra trong suite build 43. Phần này không được thay wholesale vì sẽ đổi UI/interaction của Aimlock.
+
 ## Kiểm thử
 
 - Catalog recovery sau thêm guard: chạy production body trên filesystem tạm; test ON sau OFF lỗi phải bị chặn, restore rõ ràng rồi ON mới được phép.
