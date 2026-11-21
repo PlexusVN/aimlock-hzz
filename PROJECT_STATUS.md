@@ -1,3 +1,7 @@
+## Build 2.4 (46): Ảnh chức năng từ server
+
+Ưu tiên ảnh riêng từ catalog, dùng ảnh danh mục dự phòng; cache gắn với URL hiện tại, bỏ phản hồi cũ hoặc đã hủy. Tải ảnh nền không giữ luồng sync. Thêm kiểm thử các hàm Swift thật với transport và bộ giải mã ảnh cô lập. Backend và trang reset HWID được triển khai riêng trên VPS.
+
 ## Build 2.4 (45): Đồng bộ vòng đời thao tác và chẩn đoán tải
 
 Đồng bộ tiến trình/task/cancel và mã lỗi DL của Astra; sửa đường retry sau OFF lỗi dùng bảng xác nhận hiện có. Giữ contract generic và các guard Auth/backup hiện tại. Xem [phạm vi và kết quả](docs/ASTRA_SYNC_20261121.md).

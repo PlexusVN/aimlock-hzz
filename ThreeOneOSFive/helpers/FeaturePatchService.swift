@@ -512,8 +512,18 @@ final class FeaturePatchService: ObservableObject {
     private var nativeSessionKey = ""
     private var loadedNativeVariant: GamePatchVariant?
 
-    // MARK: - Category Image Memory & Disk Cache
+    // MARK: - Patch & Category Image Memory & Disk Cache
     @Published private(set) var categoryImageCache: [Int: UIImage] = [:]
+    @Published private(set) var patchImageCache: [Int: UIImage] = [:]
+    private var catalogImageTask: Task<Void, Never>?
+
+    private let patchImagesDir: URL = {
+        let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
+            ?? FileManager.default.temporaryDirectory
+        let dir = base.appendingPathComponent("PatchImages", isDirectory: true)
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        return dir
+    }()
 
     private let categoryImagesDir: URL = {
         let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
@@ -620,6 +630,8 @@ final class FeaturePatchService: ObservableObject {
     // MARK: - Sync
 
     func syncFromServer(auth: AuthManager) async {
+        catalogImageTask?.cancel()
+        catalogImageTask = nil
         guard auth.authState == .verified else {
             verifiedCatalogVariantsByPatchID = [:]
             verifiedCatalogAuthRevision = nil
@@ -660,11 +672,23 @@ final class FeaturePatchService: ObservableObject {
                 .mapValues { Set($0.compactMap(\.artifactVariant)) }
             verifiedCatalogAuthRevision = authRevision
             preloadCategoryImages()
+            for patch in patches { _ = cachedImage(for: patch) }
             print("[FeaturePatch] sync OK: \(categories.count) categories, \(patches.count) patches")
 
-            // Tải ảnh danh mục (chỉ vài danh mục thay vì hàng chục patch)
-            for category in categories {
-                await downloadCategoryImageIfNeeded(category)
+            // Decorative images must not delay authenticated catalog operations.
+            catalogImageTask = Task { @MainActor [weak self, weak auth] in
+                for category in response.categories {
+                    guard let self, let auth, !Task.isCancelled,
+                          auth.authState == .verified, auth.authenticationRevision == authRevision,
+                          self.catalogSyncRevision == syncRevision else { return }
+                    await self.downloadCategoryImageIfNeeded(category)
+                }
+                for patch in response.patches {
+                    guard let self, let auth, !Task.isCancelled,
+                          auth.authState == .verified, auth.authenticationRevision == authRevision,
+                          self.catalogSyncRevision == syncRevision else { return }
+                    await self.downloadPatchImageIfNeeded(patch)
+                }
             }
         } catch {
             guard auth.authenticationRevision == authRevision, catalogSyncRevision == syncRevision else { return }
@@ -1638,7 +1662,7 @@ final class FeaturePatchService: ObservableObject {
     }
 
     private func localImageURL(_ patch: PatchItem) -> URL {
-        cachePath(for: patch).appendingPathComponent("image.jpg")
+        patchImagesDir.appendingPathComponent("patch_\(patch.id).jpg")
     }
 
     // MARK: - Category Image Caching & Retrieval
@@ -1658,6 +1682,14 @@ final class FeaturePatchService: ObservableObject {
     }
 
     func categoryImage(for categoryId: Int) -> UIImage? {
+        guard let category = categories.first(where: { $0.id == categoryId }),
+              !category.imageUrl.isEmpty,
+              defaults.string(forKey: "cat_img_url_\(categoryId)") == category.imageUrl else {
+            if categoryImageCache[categoryId] != nil {
+                categoryImageCache.removeValue(forKey: categoryId)
+            }
+            return nil
+        }
         if let memoryImage = categoryImageCache[categoryId] {
             return memoryImage
         }
@@ -1695,9 +1727,11 @@ final class FeaturePatchService: ObservableObject {
         guard let remoteURL = fullImageURL(for: category.imageUrl) else { return }
         do {
             let (data, response) = try await pinnedSession.data(from: remoteURL)
-            if let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode),
+            if !Task.isCancelled,
+               categories.contains(where: { $0.id == category.id && $0.imageUrl == category.imageUrl }),
+               let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode),
                let image = UIImage(data: data) {
-                try? data.write(to: localURL)
+                try data.write(to: localURL, options: .atomic)
                 defaults.set(category.imageUrl, forKey: "cat_img_url_\(category.id)")
                 categoryImageCache[category.id] = image
                 print("[FeaturePatch] category image downloaded & cached: \(category.name) (ID: \(category.id))")
@@ -1709,15 +1743,45 @@ final class FeaturePatchService: ObservableObject {
 
     // MARK: - Patch Image Retrieval
 
-    func cachedImage(for patch: PatchItem) -> UIImage? {
-        // 1. Tối ưu theo yêu cầu: Dùng chính ảnh của danh mục cho chức năng
-        if let catImage = categoryImage(for: patch.categoryId) {
-            return catImage
+    func downloadPatchImageIfNeeded(_ patch: PatchItem, force: Bool = false) async {
+        guard !patch.imageUrl.isEmpty else { return }
+        let localURL = localImageURL(patch)
+        let lastURL = defaults.string(forKey: "patch_img_url_\(patch.id)")
+        if !force && lastURL == patch.imageUrl {
+            if patchImageCache[patch.id] != nil { return }
+            if let diskImage = UIImage(contentsOfFile: localURL.path) {
+                patchImageCache[patch.id] = diskImage
+                return
+            }
         }
-        // 2. Dự phòng: ảnh riêng của patch nếu có lưu trước đó
-        let url = localImageURL(patch)
-        guard FileManager.default.fileExists(atPath: url.path) else { return nil }
-        return UIImage(contentsOfFile: url.path)
+        guard let remoteURL = fullImageURL(for: patch.imageUrl) else { return }
+        do {
+            let (data, response) = try await pinnedSession.data(from: remoteURL)
+            guard !Task.isCancelled,
+                  patches.contains(where: { $0.id == patch.id && $0.imageUrl == patch.imageUrl }),
+                  let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode),
+                  let image = UIImage(data: data) else { return }
+            try data.write(to: localURL, options: .atomic)
+            defaults.set(patch.imageUrl, forKey: "patch_img_url_\(patch.id)")
+            patchImageCache[patch.id] = image
+        } catch {
+            // A decorative image failure must not invalidate the patch catalog.
+        }
+    }
+
+    func cachedImage(for patch: PatchItem) -> UIImage? {
+        // Only reuse bytes associated with the current server-provided URL.
+        if !patch.imageUrl.isEmpty,
+           defaults.string(forKey: "patch_img_url_\(patch.id)") == patch.imageUrl {
+            if let memoryImage = patchImageCache[patch.id] { return memoryImage }
+            if let diskImage = UIImage(contentsOfFile: localImageURL(patch).path) {
+                patchImageCache[patch.id] = diskImage
+                return diskImage
+            }
+        } else if patchImageCache[patch.id] != nil {
+            patchImageCache.removeValue(forKey: patch.id)
+        }
+        return categoryImage(for: patch.categoryId)
     }
 
     // MARK: - NovaX Native Patch Menu

@@ -111,3 +111,6 @@ release-registry.json
 !/Tests/*.py
 !/Tests/*.swift
 !/Tests/*.m
+
+!/Tests/test_feature_images.py
+!/Tests/FeatureImagesSelfCheck.swift
