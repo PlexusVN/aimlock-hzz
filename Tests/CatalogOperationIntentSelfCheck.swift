@@ -1,10 +1,11 @@
 import Foundation
 
-enum FeaturePatchError: Error { case notAuthenticated }
+enum FeaturePatchError: Error { case notAuthenticated, operationInProgress }
 enum PatchEngineStateError: Error { case operationNotHeld }
 enum PatchRestoreError: Error { case confirmationExpired }
-struct PatchItem {}
+struct PatchItem { let downloadIdentity = "fixture" }
 struct PatchRestoreConfirmation { let authRevision: UInt64 = 1 }
+struct PatchOperationError: Error { let underlying: Error }
 
 @MainActor final class AuthManager {
     enum State { case verified, idle }
@@ -18,10 +19,15 @@ struct PatchRestoreConfirmation { let authRevision: UInt64 = 1 }
 }
 
 // ACTUAL_GATE
+// ACTUAL_PROGRESS
 
 @MainActor final class FeaturePatchService {
     var applied = 0
     var restored = 0
+    var patchOperation: FeaturePatchOperationProgress?
+    private var cancelCatalogOperation: (() -> Void)?
+    private var catalogOperationCancellation: FeaturePatchOperationCancellation?
+    // ACTUAL_LIFECYCLE
     // ACTUAL_APPLY_ENTRY
     // ACTUAL_RESTORE_ENTRY
     // ACTUAL_SESSION_GATE

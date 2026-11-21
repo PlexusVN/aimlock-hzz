@@ -1,7 +1,7 @@
 // Only external transport/OS boundaries are fixtures. The runner extracts the
 // unchanged production catalog methods, registry, gate and provenance store.
 enum CatalogCheckError: Error { case failed(String), writeFailure }
-enum FeaturePatchError: Error { case notAuthenticated }
+enum FeaturePatchError: Error { case notAuthenticated, operationInProgress }
 enum ProtectedDownloadError: Error { case invalidResponse }
 enum WorseQueryError: Error { case unsupportedOS(String) }
 enum PatchPackageError: Error { case restoreTargetsChanged([String]), symbolicLinkUnsupported, invalidBundleIdentifier, unsafeTargetPath }
@@ -11,7 +11,10 @@ struct PatchOperationError: Error {
     let underlying: Error
     static func wrap(_ error: Error, at: PatchOperationStage) -> Self { Self(stage:at,underlying:error) }
 }
-struct PatchItem { let id:Int; let name:String; let slug:String; var artifactVariant:String?="ffth" }
+struct PatchItem {
+    let id:Int; let name:String; let slug:String; var artifactVariant:String?="ffth"
+    var downloadIdentity:String { "\(id):\(artifactVariant ?? "legacy")" }
+}
 // Production project models are included by the runner. This convenience
 // initializer only supplies a valid application package for recovery scenarios.
 extension PatchProject {

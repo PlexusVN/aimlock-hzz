@@ -278,12 +278,88 @@ struct NovaXCommandResponse: Codable {
 
 // MARK: - Feature Patch Service
 
+// BEGIN CATALOG OPERATION PROGRESS — retained until the underlying work ends.
+struct FeaturePatchOperationProgress: Equatable, Sendable {
+    enum Stage: Equatable, Sendable {
+        case waiting, download, decode, target, access, write, restore
+
+        var message: String {
+            switch self {
+            case .waiting: return "Đang chờ thao tác dữ liệu trước hoàn tất…"
+            case .download: return "Đang tải và xác minh dữ liệu bảo mật…"
+            case .decode: return "Đang kiểm tra dữ liệu chức năng…"
+            case .target: return "Đang xác minh ứng dụng và dữ liệu đích…"
+            case .access: return "Đang kiểm tra kết nối và quyền truy cập…"
+            case .write: return "Đang ghi và xác minh dữ liệu. Vui lòng giữ app hoạt động."
+            case .restore: return "Đang khôi phục và xác minh dữ liệu. Vui lòng giữ app hoạt động."
+            }
+        }
+
+        var startsCommit: Bool { self == .write || self == .restore }
+    }
+
+    let id: UUID
+    let identity: String
+    var stage: Stage
+    var cancellationPending = false
+    // A restore followed by re-apply is one operation. Later preparation must
+    // not re-enable cancellation after its first commit has already started.
+    var commitStarted = false
+    var message: String {
+        cancellationPending ? "Đang dừng, chờ thao tác hiện tại kết thúc…" : stage.message
+    }
+    var canCancel: Bool { !commitStarted && !cancellationPending }
+}
+
+/// Cancellation can arrive off MainActor. Resolve it atomically with commit
+/// reservation so a queued UI cancellation cannot enter a write by accident.
+final class FeaturePatchOperationCancellation: @unchecked Sendable {
+    private let lock = NSLock()
+    private var cancellation: (() -> Void)?
+    private var cancellationRequested = false
+    private var commitStarted = false
+
+    func install(_ action: @escaping () -> Void) {
+        lock.lock()
+        cancellation = action
+        let requested = cancellationRequested
+        lock.unlock()
+        if requested { action() }
+    }
+
+    @discardableResult
+    func request() -> Bool {
+        lock.lock()
+        guard !commitStarted, !cancellationRequested else { lock.unlock(); return false }
+        cancellationRequested = true
+        let action = cancellation
+        lock.unlock()
+        action?()
+        return true
+    }
+
+    func beginCommit() throws {
+        lock.lock(); defer { lock.unlock() }
+        guard !cancellationRequested else { throw CancellationError() }
+        commitStarted = true
+    }
+
+    func finish() {
+        lock.lock(); defer { lock.unlock() }
+        cancellation = nil
+    }
+}
+// END CATALOG OPERATION PROGRESS
+
 @MainActor
 final class FeaturePatchService: ObservableObject {
     @Published var categories: [PatchCategory] = []
     @Published var patchStepMessage: String = ""
     @Published var patches: [PatchItem] = []
     @Published var isLoading = false
+    @Published private(set) var patchOperation: FeaturePatchOperationProgress?
+    private var cancelCatalogOperation: (() -> Void)?
+    private var catalogOperationCancellation: FeaturePatchOperationCancellation?
 
     static let colorOptions: [NovaXFeatureOption] = [
         NovaXFeatureOption(value: 0, title: "Cầu vồng"),
@@ -623,6 +699,79 @@ final class FeaturePatchService: ObservableObject {
 
     // MARK: - Apply / Restore
 
+    func cancelPatchOperation(identity: String, operationID: UUID) {
+        guard let progress = patchOperation, progress.identity == identity, progress.id == operationID else { return }
+        cancelPatchOperation(operationID: operationID)
+    }
+
+    private func cancelPatchOperation(operationID: UUID) {
+        guard let progress = patchOperation, progress.id == operationID, progress.canCancel else { return }
+        cancelCatalogOperation?()
+    }
+
+    private func markPatchCancellationPending(operationID: UUID) {
+        guard var progress = patchOperation, progress.id == operationID, !progress.commitStarted else { return }
+        progress.cancellationPending = true
+        patchOperation = progress
+    }
+
+    private func updatePatchOperation(_ stage: FeaturePatchOperationProgress.Stage) {
+        guard var progress = patchOperation else { return }
+        progress.stage = stage
+        progress.commitStarted = progress.commitStarted || stage.startsCommit
+        patchOperation = progress
+    }
+
+    private func beginPatchCommit(_ stage: FeaturePatchOperationProgress.Stage) throws {
+        try Task.checkCancellation()
+        try catalogOperationCancellation?.beginCommit()
+        updatePatchOperation(stage)
+    }
+
+    static func isPatchOperationCancellation(_ error: Error) -> Bool {
+        var cause = error
+        for _ in 0..<8 {
+            if cause is CancellationError || (cause as? URLError)?.code == .cancelled { return true }
+            guard let wrapped = cause as? PatchOperationError else { return false }
+            cause = wrapped.underlying
+        }
+        return false
+    }
+
+    private func withCatalogOperation<T>(identity: String,
+        operation: @escaping @MainActor () async throws -> T) async throws -> T {
+        guard patchOperation == nil else { throw FeaturePatchError.operationInProgress }
+        try Task.checkCancellation()
+        let id = UUID()
+        let cancellation = FeaturePatchOperationCancellation()
+        catalogOperationCancellation = cancellation
+        patchOperation = FeaturePatchOperationProgress(id: id, identity: identity, stage: .waiting)
+        beginPatchOperation()
+        // The service retains the worker through its cancellation closure.
+        // Its own defer, never a disappearing card, releases progress/busy state.
+        let worker = Task { @MainActor in
+            defer {
+                cancellation.finish()
+                if self.patchOperation?.id == id {
+                    self.patchOperation = nil
+                    self.cancelCatalogOperation = nil
+                    self.catalogOperationCancellation = nil
+                }
+                self.endPatchOperation()
+            }
+            return try await operation()
+        }
+        cancellation.install { worker.cancel() }
+        cancelCatalogOperation = { [weak self] in
+            if cancellation.request() { self?.markPatchCancellationPending(operationID: id) }
+        }
+        return try await withTaskCancellationHandler(operation: { try await worker.value }, onCancel: { [weak self] in
+            if cancellation.request() {
+                Task { @MainActor in self?.markPatchCancellationPending(operationID: id) }
+            }
+        })
+    }
+
     func applyPatch(_ patch: PatchItem, auth: AuthManager,
                     recoveryConfirmation: PatchRestoreConfirmation? = nil) async throws {
         if let recoveryConfirmation, recoveryConfirmation.authRevision != auth.authenticationRevision {
@@ -634,12 +783,12 @@ final class FeaturePatchService: ObservableObject {
         // applied; the existing restore review is the only path that can clear
         // this binding safely.
         try requirePatchEnableAllowed(patch, confirmation: recoveryConfirmation)
+        guard patchOperation == nil else { throw FeaturePatchError.operationInProgress }
         let requestedIdentity = patchStorageSlug(patch)
         setRequestedEnabled(false, identity: requestedIdentity)
         let requestedAuthRevision = auth.authenticationRevision
-        beginPatchOperation()
-        defer { endPatchOperation() }
-        do { try await withExclusivePatchOperation { operationID in
+        do { try await withCatalogOperation(identity: "patch:\(patch.downloadIdentity)") {
+          try await withExclusivePatchOperation { operationID in
             // A queued tap belongs to the session that requested it. Logging
             // out and logging in again must not replay that tap under a new key.
             guard auth.authState == .verified,
@@ -649,8 +798,10 @@ final class FeaturePatchService: ObservableObject {
             try await self.applyPatchInOperation(patch, auth: auth, operationID: operationID,
                                                   expectedRevision: requestedAuthRevision,
                                                   recoveryConfirmation: recoveryConfirmation)
+          }
         } } catch {
-            if !Task.isCancelled, auth.authenticationRevision == requestedAuthRevision {
+            if !Self.isPatchOperationCancellation(error), !Task.isCancelled,
+               auth.authenticationRevision == requestedAuthRevision {
                 setRequestedEnabled(false, identity: requestedIdentity)
             }
             throw error
@@ -671,11 +822,14 @@ final class FeaturePatchService: ObservableObject {
         let previousProjectID = catalogApplications.projectID(for: slug)
         var associatedProjectID: UUID?
         var stage = PatchOperationStage.download
+        updatePatchOperation(.download)
         do {
             if patch.artifactVariant == "generic" {
                 stage = .target
+                updatePatchOperation(.target)
                 try requireCurrentCatalogForGeneric(patch, revision: authRevision)
                 stage = .download
+                updatePatchOperation(.download)
             }
             // Requested OFF and actual file state are separate. An ON retry
             // must reuse a verified old receipt or safely restore it first;
@@ -693,6 +847,7 @@ final class FeaturePatchService: ObservableObject {
             defer { try? FileManager.default.removeItem(at: cachedURL) }
             guard auth.authState == .verified, auth.authenticationRevision == authRevision else { throw FeaturePatchError.notAuthenticated }
             stage = .decode
+            updatePatchOperation(.decode)
             let data = try Data(contentsOf: cachedURL)
             let decoded = try PatchPackageCodec.decode(data, password: nil)
             var project = decoded.project
@@ -702,8 +857,10 @@ final class FeaturePatchService: ObservableObject {
                 throw PatchRestoreError.recoveryRequired
             }
             stage = .target
+            updatePatchOperation(.target)
             try validateCatalogPackageTargets(project, variant: patch.artifactVariant ?? "")
             stage = .access
+            updatePatchOperation(.access)
             log("patch engine: iOS=\(AppInfo.versionTuple) build=\(AppInfo.osBuild) worseQueryOS=\(WorseQueryHelper.isOSSupported) worseQueryReady=\(WorseQueryHelper.isAvailable) storage=\(ExploitSupportPolicy.currentStorageMode)")
             guard ExploitSupportPolicy.currentStorageMode != .unsupported else {
                 throw WorseQueryError.unsupportedOS(AppInfo.osBuild)
@@ -718,10 +875,12 @@ final class FeaturePatchService: ObservableObject {
                 roots = nil
             } else {
                 stage = .target
+                updatePatchOperation(.target)
                 // MainActor service calls hop back to MainActor even when the
                 // View used Task.detached. Discover before entering the commit.
                 roots = try await DevicePatchService.prepareContainers(bundleIDs: project.allBundleIdentifiers)
                 stage = .access
+                updatePatchOperation(.access)
                 try Task.checkCancellation()
                 try NetworkAccessGate.shared.validateGeneration(networkGeneration)
                 guard auth.authState == .verified, auth.authenticationRevision == authRevision else {
@@ -768,6 +927,7 @@ final class FeaturePatchService: ObservableObject {
                     try await restoreProjectInOperation(activeProjectID, auth: auth, revision: authRevision,
                         operationID: operationID, confirmation: recoveryConfirmation)
                 } catch {
+                    if Self.isPatchOperationCancellation(error) { throw error }
                     throw PatchRestoreError.retryNeedsRecovery(error.localizedDescription)
                 }
                 try Task.checkCancellation()
@@ -776,7 +936,9 @@ final class FeaturePatchService: ObservableObject {
                     throw FeaturePatchError.notAuthenticated
                 }
             }
+            try Task.checkCancellation()
             stage = .write
+            try beginPatchCommit(.write)
             // Store the verified project association before writing so an app
             // interruption cannot leave a journal that the OFF switch ignores.
             try saveRecoveryMetadata(projectID: project.id, title: patch.name, identity: slug)
@@ -871,7 +1033,7 @@ final class FeaturePatchService: ObservableObject {
     }
 
     func inspectPatchRestore(_ patch: PatchItem, auth: AuthManager) async throws -> PatchRestoreConfirmation {
-        try await withAuthenticatedPatchOperation(auth: auth) { operationID, revision in
+        try await withAuthenticatedPatchOperation(auth: auth, identity: "patch:\(patch.downloadIdentity)") { operationID, revision in
             try self.requireCurrentCatalogForGeneric(patch, revision: revision)
             let projectID = try self.catalogProjectID(patch)
             return try await self.inspectProjectRestore(projectID, auth: auth, revision: revision, operationID: operationID)
@@ -879,7 +1041,7 @@ final class FeaturePatchService: ObservableObject {
     }
 
     func inspectRecoveryRestore(_ item: PatchRecoveryItem, auth: AuthManager) async throws -> PatchRestoreConfirmation {
-        try await withAuthenticatedPatchOperation(auth: auth) { operationID, revision in
+        try await withAuthenticatedPatchOperation(auth: auth, identity: "recovery:\(item.projectID.uuidString)") { operationID, revision in
             try await self.inspectProjectRestore(item.projectID, auth: auth, revision: revision, operationID: operationID)
         }
     }
@@ -888,8 +1050,9 @@ final class FeaturePatchService: ObservableObject {
         if let confirmation, confirmation.authRevision != auth.authenticationRevision {
             throw PatchRestoreError.confirmationExpired
         }
+        guard patchOperation == nil else { throw FeaturePatchError.operationInProgress }
         setRequestedEnabled(false, identity: patchStorageSlug(patch))
-        try await withAuthenticatedPatchOperation(auth: auth) { operationID, revision in
+        try await withAuthenticatedPatchOperation(auth: auth, identity: "patch:\(patch.downloadIdentity)") { operationID, revision in
             try await self.restorePatchInOperation(patch, auth: auth, operationID: operationID,
                                                    expectedRevision: revision, confirmation: confirmation)
         }
@@ -899,24 +1062,25 @@ final class FeaturePatchService: ObservableObject {
         if let confirmation, confirmation.authRevision != auth.authenticationRevision {
             throw PatchRestoreError.confirmationExpired
         }
+        guard patchOperation == nil else { throw FeaturePatchError.operationInProgress }
         setProjectRequestedEnabled(false, projectID: item.projectID)
-        try await withAuthenticatedPatchOperation(auth: auth) { operationID, revision in
+        try await withAuthenticatedPatchOperation(auth: auth, identity: "recovery:\(item.projectID.uuidString)") { operationID, revision in
             try await self.restoreProjectInOperation(item.projectID, auth: auth, revision: revision,
                                                      operationID: operationID, confirmation: confirmation)
         }
     }
 
-    private func withAuthenticatedPatchOperation<T>(auth: AuthManager,
-        operation: (UUID, UInt64) async throws -> T) async throws -> T {
+    private func withAuthenticatedPatchOperation<T>(auth: AuthManager, identity: String,
+        operation: @escaping @MainActor (UUID, UInt64) async throws -> T) async throws -> T {
         guard auth.authState == .verified else { throw FeaturePatchError.notAuthenticated }
         let revision = auth.authenticationRevision
-        beginPatchOperation()
-        defer { endPatchOperation() }
-        return try await withExclusivePatchOperation { operationID in
+        return try await withCatalogOperation(identity: identity) {
+          try await withExclusivePatchOperation { operationID in
             guard auth.authState == .verified, auth.authenticationRevision == revision else {
                 throw FeaturePatchError.notAuthenticated
             }
             return try await operation(operationID, revision)
+          }
         }
     }
 
@@ -1028,9 +1192,12 @@ final class FeaturePatchService: ObservableObject {
     private func inspectProjectRestore(_ projectID: UUID, auth: AuthManager, revision: UInt64,
                                         operationID: UUID) async throws -> PatchRestoreConfirmation {
         try await PatchFilesystemGate.shared.validate(operationID)
+        updatePatchOperation(.target)
         guard let receipt = try restoreReceipt(projectID) else { throw PatchRestoreError.missingReceipt }
+        updatePatchOperation(.access)
         let networkGeneration = try await NetworkAccessGate.shared.requireAllowed()
         try await AppIntegrityRuntime.shared.requireAllowed(force: true)
+        updatePatchOperation(.target)
         let roots = try await DevicePatchService.prepareContainers(receipt: receipt)
         let inspection = try await DirectPatchExecutor.run(validation: {
             try NetworkAccessGate.shared.validateGeneration(networkGeneration)
@@ -1058,6 +1225,7 @@ final class FeaturePatchService: ObservableObject {
             throw FeaturePatchError.notAuthenticated
         }
         defer { applicationRevision &+= 1; refreshRecoveryItems() }
+        updatePatchOperation(.target)
         let receipt = try restoreReceipt(projectID)
         if let confirmation {
             let age = Date().timeIntervalSince(confirmation.inspectedAt)
@@ -1066,6 +1234,7 @@ final class FeaturePatchService: ObservableObject {
                 throw PatchRestoreError.confirmationExpired
             }
         }
+        updatePatchOperation(.access)
         let networkGeneration = try await NetworkAccessGate.shared.requireAllowed()
         try Task.checkCancellation()
         try NetworkAccessGate.shared.validateGeneration(networkGeneration)
@@ -1074,10 +1243,12 @@ final class FeaturePatchService: ObservableObject {
         }
         if let receipt {
             try await AppIntegrityRuntime.shared.requireAllowed(force: true)
+            updatePatchOperation(.target)
             let roots = try await DevicePatchService.prepareContainers(receipt: receipt)
             try Task.checkCancellation()
             let allowChangedTargets = confirmation.map { !$0.changedPaths.isEmpty } ?? false
             let expectedCurrentState = confirmation?.currentStateSnapshot
+            try beginPatchCommit(.restore)
             try await DirectPatchExecutor.run(validation: {
                 try NetworkAccessGate.shared.validateGeneration(networkGeneration)
                 guard auth.authState == .verified, auth.authenticationRevision == revision else {
@@ -2216,6 +2387,7 @@ enum FeaturePatchError: LocalizedError {
     case httpError(statusCode: Int)
     case hashMismatch(expected: String, got: String)
     case notAuthenticated
+    case operationInProgress
 
     var errorDescription: String? {
         switch self {
@@ -2224,6 +2396,7 @@ enum FeaturePatchError: LocalizedError {
         case .httpError(let code): return "Máy chủ phản hồi mã lỗi \(code)"
         case .hashMismatch: return "Dữ liệu không toàn vẹn. Vui lòng thử lại"
         case .notAuthenticated: return "Vui lòng đăng nhập để sử dụng chức năng này"
+        case .operationInProgress: return "Đang có thao tác dữ liệu chưa kết thúc. Hãy chờ hoặc hủy bước chuẩn bị đang chạy."
         }
     }
 }

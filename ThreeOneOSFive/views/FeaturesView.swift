@@ -414,14 +414,13 @@ struct FeaturesView: View {
                         let confirmation = try await service.inspectPatchRestore(patch, auth: authManager)
                         try Task.checkCancellation()
                         guard authManager.authenticationRevision == requestedRevision else { return }
-                        if !confirmation.changedPaths.isEmpty {
-                            // Reuse the existing review sheet from this same
-                            // toggle. No separate recovery panel is required.
-                            pendingRestore = FeatureRestoreReview(target: .patch(patch),
-                                confirmation: confirmation, requestedRevision: requestedRevision,
-                                reenablePatch: patch)
-                            return
-                        }
+                        // A pending OFF also requires recovery when the files
+                        // have not changed. Keep that path reachable through
+                        // this same review instead of stranding the OFF toggle.
+                        pendingRestore = FeatureRestoreReview(target: .patch(patch),
+                            confirmation: confirmation, requestedRevision: requestedRevision,
+                            reenablePatch: patch)
+                        return
                     } catch {
                         showFailure(error, title: "Không thể bật chức năng")
                         return
@@ -456,7 +455,7 @@ struct FeaturesView: View {
                                                           requestedRevision: requestedRevision)
                 }
             } catch {
-                if !(error is CancellationError) { recordOffFailure(target, requestedRevision: requestedRevision) }
+                if !FeaturePatchService.isPatchOperationCancellation(error) { recordOffFailure(target, requestedRevision: requestedRevision) }
                 showFailure(error, title: "Không thể khôi phục")
             }
         }
@@ -481,7 +480,7 @@ struct FeaturesView: View {
                     showRestoreSuccess()
                 }
             } catch {
-                if !(error is CancellationError) { recordOffFailure(review.target, requestedRevision: review.requestedRevision) }
+                if !FeaturePatchService.isPatchOperationCancellation(error) { recordOffFailure(review.target, requestedRevision: review.requestedRevision) }
                 showFailure(error, title: "Chưa thể khôi phục")
             }
         }
@@ -512,12 +511,13 @@ struct FeaturesView: View {
     }
 
     private func showSuccess(title: String, message: String) {
+        guard !Task.isCancelled else { return }
         Haptics.success()
         activeToast = ToastInfo(title: title, message: message, isSuccess: true)
     }
 
     private func showFailure(_ error: Error, title: String) {
-        guard !(error is CancellationError) else { return }
+        guard !Task.isCancelled, !FeaturePatchService.isPatchOperationCancellation(error) else { return }
         Haptics.error()
         activeToast = ToastInfo(title: title,
                               message: (error as? LocalizedError)?.errorDescription
@@ -564,14 +564,16 @@ private struct RestoreReviewSheet: View {
             HStack(spacing: 10) {
                 Image(systemName: "exclamationmark.triangle.fill")
                     .foregroundStyle(AppTheme.statusWarning)
-                Text("Dữ liệu đã thay đổi")
+                Text(review.confirmation.changedPaths.isEmpty ? "Hoàn tất khôi phục" : "Dữ liệu đã thay đổi")
                     .font(.system(size: 20, weight: .bold))
                     .foregroundStyle(AppTheme.gamingText)
             }
             Text(userFacingFeatureText(review.target.title, fallback: "Chức năng đã áp dụng"))
                 .font(.system(size: 14, weight: .semibold))
                 .foregroundStyle(AppTheme.gamingText)
-            Text("Game hoặc ứng dụng đã sửa các mục dưới đây sau lần bật. Khôi phục sẽ thay thế dữ liệu hiện tại bằng bản sao lưu trước lần áp dụng; các thay đổi mới hơn ở những mục này sẽ mất.")
+            Text(review.confirmation.changedPaths.isEmpty
+                 ? "Lần tắt trước chưa khôi phục xong. Xác nhận để trả lại bản sao lưu trước lần áp dụng, sau đó bật lại chức năng."
+                 : "Game hoặc ứng dụng đã sửa các mục dưới đây sau lần bật. Khôi phục sẽ thay thế dữ liệu hiện tại bằng bản sao lưu trước lần áp dụng; các thay đổi mới hơn ở những mục này sẽ mất.")
                 .font(.system(size: 13))
                 .foregroundStyle(AppTheme.gamingTextSecondary)
                 .fixedSize(horizontal: false, vertical: true)
@@ -631,6 +633,10 @@ struct PatchCardView: View {
     let isWorking: Bool
     let actionsBlocked: Bool
     let onToggle: () -> Void
+    private var operationProgress: FeaturePatchOperationProgress? {
+        guard service.patchOperation?.identity == "patch:\(patch.downloadIdentity)" else { return nil }
+        return service.patchOperation
+    }
     private var applicationState: PatchApplicationState { service.patchApplicationState(patch) }
     private var isEnabled: Bool { service.isPatchEnabled(patch) }
     private var needsRecovery: Bool { applicationState.requiresRestore && !isEnabled }
@@ -662,6 +668,23 @@ struct PatchCardView: View {
                         .lineLimit(1)
                 }
                 .foregroundStyle(stateColor)
+                if let progress = operationProgress {
+                    Text(progress.message)
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundStyle(AppTheme.gamingTextSecondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .accessibilityIdentifier("patch-progress-\(patch.downloadIdentity)")
+                    if progress.canCancel {
+                        Button("Hủy chuẩn bị") {
+                            service.cancelPatchOperation(identity: progress.identity, operationID: progress.id)
+                        }
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundStyle(AppTheme.gamingText)
+                        .frame(minHeight: 32)
+                        .buttonStyle(GamingPressButtonStyle())
+                        .accessibilityIdentifier("patch-cancel-\(patch.downloadIdentity)")
+                    }
+                }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
             toggleButton
@@ -711,7 +734,7 @@ struct PatchCardView: View {
 
     @ViewBuilder
     private var toggleButton: some View {
-        if isWorking {
+        if isWorking || operationProgress != nil {
             ZStack {
                 Capsule().fill(AppTheme.gamingSurfaceRaised)
                     .frame(width: 52, height: 28)

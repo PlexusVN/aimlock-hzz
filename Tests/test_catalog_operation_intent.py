@@ -31,6 +31,12 @@ class CatalogOperationIntentChecks(unittest.TestCase):
         transaction = (ROOT / 'ThreeOneOSFive/helpers/PatchTransaction.swift').read_text(encoding='utf-8')
         gate = transaction[transaction.index('actor PatchFilesystemGate {'):transaction.index('// END PATCH FILESYSTEM GATE')]
         feature = (ROOT / 'ThreeOneOSFive/helpers/FeaturePatchService.swift').read_text(encoding='utf-8')
+        source = source.replace('// ACTUAL_PROGRESS', feature[feature.index('struct FeaturePatchOperationProgress:'):feature.index('// END CATALOG OPERATION PROGRESS')])
+        helpers = ['func cancelPatchOperation(identity:', 'private func cancelPatchOperation(operationID:',
+                   'private func markPatchCancellationPending(', 'private func updatePatchOperation(',
+                   'private func beginPatchCommit(', 'static func isPatchOperationCancellation(',
+                   'private func withCatalogOperation<']
+        source = source.replace('// ACTUAL_LIFECYCLE', '\n'.join(extract_function(feature, name) for name in helpers))
         source = source.replace('// ACTUAL_GATE', gate)
         source = source.replace('// ACTUAL_APPLY_ENTRY', extract_function(feature, 'func applyPatch('))
         source = source.replace('// ACTUAL_RESTORE_ENTRY', extract_function(feature, 'func restorePatch('))

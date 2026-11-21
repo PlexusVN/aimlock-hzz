@@ -50,6 +50,7 @@ func applicationStore() throws -> PatchEngineApplicationStore { Fixture.store }
             source += extract_function(coordinator, signature) + '\n'
         source += '}\n'
         feature = (ROOT / 'ThreeOneOSFive/helpers/FeaturePatchService.swift').read_text(encoding='utf-8')
+        source += feature.split('// BEGIN CATALOG OPERATION PROGRESS', 1)[1].split('// END CATALOG OPERATION PROGRESS', 1)[0].split('\n', 1)[1]
         source += feature[feature.index('struct PatchRestoreConfirmation:'):feature.index('struct PatchCategory:')]
         source += '''
 @MainActor final class FeaturePatchService {
@@ -57,6 +58,9 @@ let defaults=UserDefaults.standard
 var catalogApplications:CatalogPatchApplicationRegistry { CatalogPatchApplicationRegistry(defaults:defaults) }
 var patchProjectsDir:URL { Fixture.root }
 var applicationRevision=0
+var patchOperation:FeaturePatchOperationProgress?
+private var cancelCatalogOperation:(()->Void)?
+private var catalogOperationCancellation:FeaturePatchOperationCancellation?
 private var verifiedCatalogVariantsByPatchID:[Int:Set<String>]=[:]
 private var verifiedCatalogAuthRevision:UInt64?
 func patchStorageSlug(_ patch:PatchItem)->String { patch.identity }
@@ -71,6 +75,10 @@ private func setRequestedEnabled(_ value:Bool,identity:String) {}
 private func readRecoveryMetadata() throws -> [CatalogRecoveryMetadata] { [] }
 '''
         for signature in ['func restorePatch(', 'private func restorePatchInOperation(',
+                          'func cancelPatchOperation(identity:', 'private func cancelPatchOperation(operationID:',
+                          'private func markPatchCancellationPending(', 'private func updatePatchOperation(',
+                          'private func beginPatchCommit(', 'static func isPatchOperationCancellation(',
+                          'private func withCatalogOperation<',
                           'private func withAuthenticatedPatchOperation<', 'private func catalogProjectID(',
                           'private func activeCatalogProjectIDs(', 'private func catalogLookupIdentities(',
                           'private func requireCurrentCatalogForGeneric(',

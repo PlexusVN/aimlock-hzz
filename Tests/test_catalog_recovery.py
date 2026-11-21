@@ -9,6 +9,10 @@ from check_airlift_pairing_finish import extract_function
 
 ROOT = Path(__file__).resolve().parents[1]
 METHODS = [
+    'func cancelPatchOperation(identity:', 'private func cancelPatchOperation(operationID:',
+    'private func markPatchCancellationPending(', 'private func updatePatchOperation(',
+    'private func beginPatchCommit(', 'static func isPatchOperationCancellation(',
+    'private func withCatalogOperation<',
     'func applyPatch(', 'private func applyPatchInOperation(',
     'private func validateCatalogPackageTargets(',
     'func inspectPatchRestore(', 'func inspectRecoveryRestore(',
@@ -38,6 +42,7 @@ def production_sources():
     source = (ROOT / 'ThreeOneOSFive/helpers/FeaturePatchService.swift').read_text(encoding='utf-8')
     transaction = (ROOT / 'ThreeOneOSFive/helpers/PatchTransaction.swift').read_text(encoding='utf-8')
     code = 'import Foundation\n'
+    code += source.split('// BEGIN CATALOG OPERATION PROGRESS', 1)[1].split('// END CATALOG OPERATION PROGRESS', 1)[0].split('\n', 1)[1]
     code += source[source.index('struct PatchRecoveryItem:'):source.index('struct PatchCategory:')]
     code += transaction[transaction.index('struct PatchTransactionReceipt:'):transaction.index('enum PatchTransaction {')]
     code += extract_function(source, 'enum PatchRestoreError:') + '\n'
@@ -58,6 +63,9 @@ var applicationRevision:UInt64=0
 var recoveryItems:[PatchRecoveryItem]=[]
 var recoveryInventoryError:String?
 var patchOperationInProgress=false
+var patchOperation:FeaturePatchOperationProgress?
+private var cancelCatalogOperation:(()->Void)?
+private var catalogOperationCancellation:FeaturePatchOperationCancellation?
 private var pendingPatchOperations=0
 private var requestedStateOverrides:[String:Bool]=[:]
 private var requestedProjectOverrides:[UUID:Bool]=[:]

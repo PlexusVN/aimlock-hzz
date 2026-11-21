@@ -6,6 +6,7 @@ enum ProtectedDownloadError: LocalizedError {
     case rejected(String)
     case quarantined(until: Date?, retryAfterSeconds: Int?)
     case invalidResponse
+    case invalidResponseDetail(code: String)
     var errorDescription: String? {
         switch self {
         case .quarantined(let until, let retryAfterSeconds):
@@ -63,7 +64,27 @@ enum ProtectedDownloadError: LocalizedError {
                 return "Máy chủ chưa thể cấp quyền tải bảo mật. Hãy thử lại hoặc liên hệ hỗ trợ."
             }
         case .invalidResponse: return "Phản hồi tải bảo mật không hợp lệ."
+        case .invalidResponseDetail(let code):
+            guard Self.validDiagnosticCode(code) else { return "Phản hồi tải bảo mật không hợp lệ." }
+            return "Phản hồi tải bảo mật không hợp lệ (\(code)). Hãy tải lại danh mục rồi thử lại; nếu vẫn lỗi, gửi mã này cho hỗ trợ."
         }
+    }
+
+    /// Local, fixed diagnostic codes distinguish the exact failed protocol
+    /// check. Never include license keys, paths, IDs or server-provided text.
+    private static func validDiagnosticCode(_ code: String) -> Bool {
+        code.utf8.count == 4 && code.hasPrefix("DL")
+            && code.utf8.dropFirst(2).allSatisfy { (48...57).contains($0) }
+    }
+
+    static func invalidResponse(at code: String) -> ProtectedDownloadError {
+        validDiagnosticCode(code) ? .invalidResponseDetail(code: code) : .invalidResponse
+    }
+
+    static func diagnosticCode(for error: Error) -> String? {
+        guard case ProtectedDownloadError.invalidResponseDetail(let code) = error,
+              validDiagnosticCode(code) else { return nil }
+        return code
     }
 
     /// Only call after SecureAPIClient authenticates the exact HTTPS origin
@@ -73,7 +94,7 @@ enum ProtectedDownloadError: LocalizedError {
               let code = object["code"] as? String,
               code.range(of: #"^[a-z0-9_]{1,80}$"#, options: .regularExpression) != nil else { return nil }
         guard code == "device_quarantined" else { return .rejected(code) }
-        guard statusCode == 423 else { return .invalidResponse }
+        guard statusCode == 423 else { return invalidResponse(at: "DL01") }
         var until: Date?
         if let timestamp = object["quarantine_until"] as? String, timestamp.utf8.count <= 64 {
             let formatter = ISO8601DateFormatter()
@@ -225,7 +246,7 @@ final class ProtectedDownloadService: ObservableObject {
         // Refresh before EACH protected request, before allocating its proof.
         // The integrity endpoint is outside this prefix, so renewal cannot recurse.
         if ProtectedReleaseLease.required(for: path) {
-            guard signed, bearer, detachedSession == nil else { throw ProtectedDownloadError.invalidResponse }
+            guard signed, bearer, detachedSession == nil else { throw ProtectedDownloadError.invalidResponse(at: "DL23") }
             try await ensureReleaseLease()
         }
         let epoch = contextEpoch
@@ -294,8 +315,12 @@ final class ProtectedDownloadService: ObservableObject {
     }
 
     private func dictionary(_ data: Data) throws -> [String: Any] {
-        guard let value = try JSONSerialization.jsonObject(with: data) as? [String: Any],
-              value["success"] as? Bool == true else { throw ProtectedDownloadError.invalidResponse }
+        guard let value = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else {
+            throw ProtectedDownloadError.invalidResponse(at: "DL02")
+        }
+        guard value["success"] as? Bool == true else {
+            throw ProtectedDownloadError.invalidResponse(at: "DL03")
+        }
         return value
     }
 
@@ -353,7 +378,7 @@ final class ProtectedDownloadService: ObservableObject {
                     guard let actualBinding = payload["license_binding"] as? String,
                           let keyID = payload["key_id"] as? Int,
                           payload["device_key_id"] as? String == legacyID else {
-                        throw ProtectedDownloadError.invalidResponse
+                        throw ProtectedDownloadError.invalidResponse(at: "DL04")
                     }
                     do {
                         try legacy.migrateLegacy(to: actualBinding, expectedDeviceID: legacyID, keyID: keyID)
@@ -435,7 +460,7 @@ final class ProtectedDownloadService: ObservableObject {
         try requireRecoveryContext(context, epoch: epoch)
         guard let challenge = ProtectedRecoveryChallenge(try dictionary(challengeData),
             licenseBinding: context.binding, expectedKeyID: nil) else {
-            throw ProtectedDownloadError.invalidResponse
+            throw ProtectedDownloadError.invalidResponse(at: "DL05")
         }
         // A remembered enrollment cannot silently generate replacement keys.
         // New users may create keys only after the active license challenge.
@@ -458,7 +483,7 @@ final class ProtectedDownloadService: ObservableObject {
         try requireRecoveryContext(context, epoch: epoch)
         let enrolled = try dictionary(enrolledData)
         let fingerprint: (String) throws -> String = { value in
-            guard let bytes = Data(base64Encoded: value), bytes.count == 65 else { throw ProtectedDownloadError.invalidResponse }
+            guard let bytes = Data(base64Encoded: value), bytes.count == 65 else { throw ProtectedDownloadError.invalidResponse(at: "DL06") }
             return SHA256.hash(data: bytes).map { String(format: "%02x", $0) }.joined()
         }
         guard enrolled["license_binding"] as? String == context.binding,
@@ -523,7 +548,7 @@ final class ProtectedDownloadService: ObservableObject {
         try requireRecoveryContext(context, epoch: epoch)
         guard let challenge = ProtectedRecoveryChallenge(try dictionary(data),
                 licenseBinding: context.binding, expectedKeyID: expectedKeyID) else {
-            throw ProtectedDownloadError.invalidResponse
+            throw ProtectedDownloadError.invalidResponse(at: "DL07")
         }
         let candidate: DeviceIdentityService
         if let pending {
@@ -571,7 +596,7 @@ final class ProtectedDownloadService: ObservableObject {
                 SHA256.hash(data: signingBytes).map({ String(format: "%02x", $0) }).joined(),
               enrolled["agreement_public_key_fingerprint"] as? String ==
                 SHA256.hash(data: agreementBytes).map({ String(format: "%02x", $0) }).joined() else {
-            throw ProtectedDownloadError.invalidResponse
+            throw ProtectedDownloadError.invalidResponse(at: "DL08")
         }
         // Promotion is durable and keeps the old generation intact. No await
         // occurs between the final context check and publishing the new identity.
@@ -612,7 +637,9 @@ final class ProtectedDownloadService: ObservableObject {
         try identity.persistServerKeyID(keyID)
         guard let id = session["app_session_id"] as? String, UUID(uuidString: id) != nil,
               let token = session["app_session_token"] as? String, !token.isEmpty,
-              let expiryString = session["session_expires_at"] as? String else { throw ProtectedDownloadError.invalidResponse }
+              let expiryString = session["session_expires_at"] as? String else {
+            throw ProtectedDownloadError.invalidResponse(at: "DL09")
+        }
         let formatter = ISO8601DateFormatter()
         formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
         var expiry = expiryString.utf8.count <= 64 ? formatter.date(from: expiryString) : nil
@@ -620,7 +647,8 @@ final class ProtectedDownloadService: ObservableObject {
             formatter.formatOptions = [.withInternetDateTime]
             expiry = formatter.date(from: expiryString)
         }
-        guard let expiry, expiry > Date() else { throw ProtectedDownloadError.invalidResponse }
+        let verifiedNow = lastResponseTime?.verificationDate(at: ProcessInfo.processInfo.systemUptime) ?? Date()
+        guard let expiry, expiry > verifiedNow else { throw ProtectedDownloadError.invalidResponse(at: "DL10") }
         sessionID = id; sessionToken = token; sessionExpiry = expiry
     }
 
@@ -693,7 +721,7 @@ final class ProtectedDownloadService: ObservableObject {
             try await ensureReleaseLease()
             guard let artifactID = patch.artifactID,
                   let digest = patch.manifestDigest,
-                  let variant = patch.artifactVariant else { throw ProtectedDownloadError.invalidResponse }
+                  let variant = patch.artifactVariant else { throw ProtectedDownloadError.invalidResponse(at: "DL22") }
             let descriptor = ProtectedArtifactDescriptor(artifactID: artifactID,
                 fileHash: patch.fileHash, fileSize: patch.fileSize, version: Int64(patch.version),
                 manifestDigest: digest, variant: variant, kind: "package", fileName: nil)
@@ -808,8 +836,8 @@ final class ProtectedDownloadService: ObservableObject {
               artifact["artifact_variant"] as? String == variant.rawValue,
               artifact["kind"] as? String == kind.rawValue,
               let fileName = artifact["file_name"] as? String,
-              let manifest = artifact["signed_manifest"] else {
-            throw ProtectedDownloadError.invalidResponse
+              let manifest = artifact["signed_manifest"] as? [String: Any] else {
+            throw ProtectedDownloadError.invalidResponse(at: "DL11")
         }
         let descriptor = ProtectedArtifactDescriptor(artifactID: artifactID, fileHash: hash,
             fileSize: size, version: version, manifestDigest: digest,
@@ -827,26 +855,34 @@ final class ProtectedDownloadService: ObservableObject {
                                   auth: AuthManager) async throws -> ProtectedCodePatchDownload {
         guard UUID(uuidString: descriptor.artifactID) != nil,
               AppSecurityConfiguration.supportsProtectedArtifact(variant: descriptor.variant, kind: descriptor.kind) else {
-            throw ProtectedDownloadError.invalidResponse
+            throw ProtectedDownloadError.invalidResponse(at: "DL14")
         }
         let initialLicenseDigest = licenseDigest
         let (grantData, _) = try await post("/api/v2/artifacts/\(descriptor.artifactID)/grants",
             body: [:], signed: true, purpose: "artifact-grant")
         let granted = try dictionary(grantData)
-        guard let grantID = granted["grant_id"] as? String, UUID(uuidString: grantID) != nil,
-              granted["artifact_id"] as? String == descriptor.artifactID else {
-            throw ProtectedDownloadError.invalidResponse
+        guard let grantID = granted["grant_id"] as? String, UUID(uuidString: grantID) != nil else {
+            throw ProtectedDownloadError.invalidResponse(at: "DL15")
+        }
+        guard granted["artifact_id"] as? String == descriptor.artifactID else {
+            throw ProtectedDownloadError.invalidResponse(at: "DL16")
         }
         let (contentData, nonce) = try await post("/api/v2/artifacts/\(descriptor.artifactID)/content",
             body: ["grant_id": grantID], signed: true, purpose: nil)
         let contentTime = lastResponseTime
-        guard contentData.count <= 72 * 1024 * 1024 else { throw ProtectedDownloadError.invalidResponse }
+        guard contentData.count <= 72 * 1024 * 1024 else { throw ProtectedDownloadError.invalidResponse(at: "DL17") }
         let content = try dictionary(contentData)
-        guard let manifest = content["signed_manifest"], let grant = content["signed_grant"],
-              let encoded = content["ciphertext_b64"] as? String,
-              let ciphertext = Data(base64Encoded: encoded),
-              let identity, let deviceID = try identity.persistedEnrollmentID() else {
-            throw ProtectedDownloadError.invalidResponse
+        guard let manifest = content["signed_manifest"] as? [String: Any],
+              let grant = content["signed_grant"] as? [String: Any] else {
+            throw ProtectedDownloadError.invalidResponse(at: "DL18")
+        }
+        guard let encoded = content["ciphertext_b64"] as? String,
+              let ciphertext = Data(base64Encoded: encoded) else {
+            throw ProtectedDownloadError.invalidResponse(at: "DL19")
+        }
+        try requireCurrentLicense(auth)
+        guard let identity, let deviceID = try identity.persistedEnrollmentID() else {
+            throw DeviceIdentityError.identityMissing
         }
         let manifestData = try JSONSerialization.data(withJSONObject: manifest,
             options: [.sortedKeys, .withoutEscapingSlashes])
@@ -857,7 +893,7 @@ final class ProtectedDownloadService: ObservableObject {
         let decoder = ProtectedArtifactDecoder(verifier: .shared, recipientIdentity: {
             guard let id = try identity.persistedEnrollmentID(),
                   let publicKey = Data(base64Encoded: try identity.getOrCreateAgreementKey().publicKeyX963Base64) else {
-                throw ProtectedDownloadError.invalidResponse
+                throw DeviceIdentityError.invalidIdentity
             }
             return (id, publicKey)
         }, sharedSecret: { try identity.agreementSharedSecret(peerPublicKeyX963: $0) })
@@ -868,9 +904,11 @@ final class ProtectedDownloadService: ObservableObject {
             now: contentTime?.verificationDate(at: ProcessInfo.processInfo.systemUptime) ?? Date())
         try await AppIntegrityRuntime.shared.requireAllowed(force:true)
         try requireCurrentLicense(auth)
-        guard licenseDigest == initialLicenseDigest,
-              SHA256.hash(data: plaintext).map({ String(format: "%02x", $0) }).joined() == descriptor.fileHash,
-              plaintext.count == descriptor.fileSize else { throw ProtectedDownloadError.invalidResponse }
+        guard licenseDigest == initialLicenseDigest else { throw FeaturePatchError.notAuthenticated }
+        guard SHA256.hash(data: plaintext).map({ String(format: "%02x", $0) }).joined() == descriptor.fileHash else {
+            throw ProtectedDownloadError.invalidResponse(at: "DL20")
+        }
+        guard plaintext.count == descriptor.fileSize else { throw ProtectedDownloadError.invalidResponse(at: "DL21") }
         return ProtectedCodePatchDownload(data: plaintext, fileName: manifestBody.fileName)
     }
 
@@ -878,13 +916,15 @@ final class ProtectedDownloadService: ObservableObject {
                                     manifest: ProtectedArtifactManifest, signedDocument: Any) throws {
         let digest = SHA256.hash(data: try ProtectedArtifactDecoder.canonicalData(signedDocument))
             .map { String(format: "%02x", $0) }.joined()
-        guard manifest.artifactId == descriptor.artifactID, digest == descriptor.manifestDigest,
-              manifest.kind == descriptor.kind, manifest.variant == descriptor.variant,
-              manifest.releaseVersion == descriptor.version,
-              manifest.plaintextSHA256 == descriptor.fileHash,
-              manifest.plaintextSize == descriptor.fileSize,
-              descriptor.fileName == nil || descriptor.fileName == manifest.fileName else {
-            throw ProtectedDownloadError.invalidResponse
+        guard manifest.artifactId == descriptor.artifactID else { throw ProtectedDownloadError.invalidResponse(at: "DL30") }
+        guard digest == descriptor.manifestDigest else { throw ProtectedDownloadError.invalidResponse(at: "DL31") }
+        guard manifest.kind == descriptor.kind else { throw ProtectedDownloadError.invalidResponse(at: "DL32") }
+        guard manifest.variant == descriptor.variant else { throw ProtectedDownloadError.invalidResponse(at: "DL33") }
+        guard manifest.releaseVersion == descriptor.version else { throw ProtectedDownloadError.invalidResponse(at: "DL34") }
+        guard manifest.plaintextSHA256 == descriptor.fileHash else { throw ProtectedDownloadError.invalidResponse(at: "DL35") }
+        guard manifest.plaintextSize == descriptor.fileSize else { throw ProtectedDownloadError.invalidResponse(at: "DL36") }
+        guard descriptor.fileName == nil || descriptor.fileName == manifest.fileName else {
+            throw ProtectedDownloadError.invalidResponse(at: "DL37")
         }
     }
 

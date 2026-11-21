@@ -50,9 +50,13 @@ struct FixturePublisher { func send() {} }
     var authState:State = .verified
     var authenticationRevision:UInt64=0
 }
-enum FeaturePatchError:Error { case notAuthenticated }
+enum FeaturePatchError:Error { case notAuthenticated, operationInProgress }
+struct PatchOperationError:Error { let underlying:Error }
 enum PatchRestoreError:Error { case missingReceipt, confirmationExpired, recoveryRequired }
-struct PatchItem { let identity:String; var id:Int=1; var artifactVariant:String?="ffth" }
+struct PatchItem {
+    let identity:String; var id:Int=1; var artifactVariant:String?="ffth"
+    var downloadIdentity:String { "\(id):\(artifactVariant ?? "legacy")" }
+}
 enum ProtectedDownloadError:Error { case invalidResponse }
 enum WorseQueryHelper {
     static let isAvailable=false

@@ -1,7 +1,10 @@
 import Foundation
 
 enum DeviceIdentityError: Error { case identityMissing, invalidIdentity, ambiguousIdentity, keychain(Int32) }
-enum ProtectedDownloadError: Error { case invalidResponse, rejected(String) }
+enum ProtectedDownloadError: Error {
+    case invalidResponse, invalidResponseDetail(code: String), rejected(String)
+    static func invalidResponse(at code: String) -> Self { .invalidResponseDetail(code: code) }
+}
 enum BoundaryFailure: Error { case transient, failed(String) }
 enum FeaturePatchError: Error { case notAuthenticated }
 

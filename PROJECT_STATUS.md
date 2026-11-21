@@ -1,3 +1,7 @@
+## Build 2.4 (45): Đồng bộ vòng đời thao tác và chẩn đoán tải
+
+Đồng bộ tiến trình/task/cancel và mã lỗi DL của Astra; sửa đường retry sau OFF lỗi dùng bảng xác nhận hiện có. Giữ contract generic và các guard Auth/backup hiện tại. Xem [phạm vi và kết quả](docs/ASTRA_SYNC_20261121.md).
+
 ## Build 2.4 (44): Đồng bộ sửa lỗi Astra về thời gian grant và recovery ON/OFF
 
 Đồng bộ kiểm tra thời gian phản hồi HTTPS bằng HTTP Date + uptime, và chặn bật lại khi lần OFF trước chưa khôi phục xong. Existing review sheet vẫn là đường xác nhận recovery. Xem [báo cáo đồng bộ Astra 17/11/2026](docs/ASTRA_SYNC_20261117.md).

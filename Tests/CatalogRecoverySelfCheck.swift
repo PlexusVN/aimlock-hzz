@@ -388,8 +388,8 @@ import Foundation
             do { try await task.value;successes += 1 }
             catch { refusals += 1 }
         }
-        try check(successes==2 && refusals==0 && Fixture.applies==1 && Fixture.downloads==2,
-                  "two queued ON requests did not reuse the original verified application")
+        try check(successes==1 && refusals==1 && Fixture.applies==1 && Fixture.downloads==1,
+                  "a second ON request was admitted while the original operation remained active")
         try check(!concurrent.patchOperationInProgress,"completed queue retained busy state")
 
         // User intent is OFF even when restoration fails. Actual history and
