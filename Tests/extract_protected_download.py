@@ -33,6 +33,11 @@ def source() -> str:
 import CoreFoundation
 
 enum DownloadCheckFailure: Error { case failed(String) }
+// The real read-only executor has independent timeout/concurrency tests.
+// This fixture keeps OS/crypto boundary counters isolated on MainActor.
+@MainActor enum DirectPatchPreparation {
+    static func run<T>(operation: @MainActor () async throws -> T) async throws -> T { try await operation() }
+}
 enum FeaturePatchError: Error { case notAuthenticated }
 enum GamePatchVariant: String { case ffth, ffmax }
 enum FeaturePatchService { enum CodePatchKind: String { case mod, original } }

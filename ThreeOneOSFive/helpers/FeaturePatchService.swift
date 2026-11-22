@@ -305,8 +305,10 @@ struct FeaturePatchOperationProgress: Equatable, Sendable {
     // A restore followed by re-apply is one operation. Later preparation must
     // not re-enable cancellation after its first commit has already started.
     var commitStarted = false
+    var isTakingLonger = false
     var message: String {
-        cancellationPending ? "Đang dừng, chờ thao tác hiện tại kết thúc…" : stage.message
+        if cancellationPending { return "Đang dừng, chờ thao tác hiện tại kết thúc…" }
+        return stage.message + (isTakingLonger ? "\nHệ thống đang xử lý chậm hơn bình thường. Vui lòng chờ thao tác kết thúc." : "")
     }
     var canCancel: Bool { !commitStarted && !cancellationPending }
 }
@@ -367,14 +369,18 @@ final class FeaturePatchService: ObservableObject {
             let file = try await self.downloadPatch(patch, auth: auth)
             defer { try? FileManager.default.removeItem(at: file) }
             self.updatePatchOperation(.decode)
-            var project = try PatchPackageCodec.decode(Data(contentsOf: file), password: nil).project
+            var project = try await DirectPatchPreparation.run {
+                try PatchPackageCodec.decode(Data(contentsOf: file), password: nil).project
+            }
             try self.validateCatalogPackageTargets(project, variant: patch.artifactVariant ?? "")
             // Package IDs may be reused by uploads. A local activation has its
             // own journal; Bundle IDs and relative paths stay exactly as supplied.
             project.id = UUID()
             project.isPrivate = true
+            self.updatePatchOperation(.target)
             let roots: [String: URL]? = StorageEngineCoordinator.shared.isAirLiftActive ? nil
                 : try await DevicePatchService.prepareContainers(bundleIDs: project.allBundleIdentifiers)
+            self.updatePatchOperation(.access)
             let generation = try await NetworkAccessGate.shared.requireAllowed()
             try await AppIntegrityRuntime.shared.requireAllowed(force: true)
             try Task.checkCancellation()
@@ -770,6 +776,7 @@ final class FeaturePatchService: ObservableObject {
 
         let data = try await ProtectedDownloadService.shared.download(patch, auth: auth)
         do {
+          return try await DirectPatchExecutor.run(validation: {}) {
             var dir = FileManager.default.temporaryDirectory.appendingPathComponent("AstraProtectedStaging", isDirectory: true)
             try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true,
                 attributes: [.protectionKey: FileProtectionType.complete])
@@ -778,6 +785,7 @@ final class FeaturePatchService: ObservableObject {
             let file = dir.appendingPathComponent(UUID().uuidString + ".3105")
             try data.write(to: file, options: [.atomic, .completeFileProtection])
             return file
+          }
         } catch { throw PatchOperationError.wrap(error, at: .staging) }
     }
 
@@ -834,7 +842,14 @@ final class FeaturePatchService: ObservableObject {
         // The service retains the worker through its cancellation closure.
         // Its own defer, never a disappearing card, releases progress/busy state.
         let worker = Task { @MainActor in
+            let slowNotice = Task { @MainActor [weak self] in
+                do { try await Task.sleep(nanoseconds: 15_000_000_000) } catch { return }
+                guard var progress = self?.patchOperation, progress.id == id else { return }
+                progress.isTakingLonger = true
+                self?.patchOperation = progress
+            }
             defer {
+                slowNotice.cancel()
                 cancellation.finish()
                 if self.patchOperation?.id == id {
                     self.patchOperation = nil

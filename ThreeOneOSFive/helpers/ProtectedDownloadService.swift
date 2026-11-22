@@ -871,23 +871,27 @@ final class ProtectedDownloadService: ObservableObject {
             body: ["grant_id": grantID], signed: true, purpose: nil)
         let contentTime = lastResponseTime
         guard contentData.count <= 72 * 1024 * 1024 else { throw ProtectedDownloadError.invalidResponse(at: "DL17") }
-        let content = try dictionary(contentData)
-        guard let manifest = content["signed_manifest"] as? [String: Any],
-              let grant = content["signed_grant"] as? [String: Any] else {
-            throw ProtectedDownloadError.invalidResponse(at: "DL18")
+        let prepared = try await DirectPatchPreparation.run {
+            guard let content = try JSONSerialization.jsonObject(with: contentData) as? [String: Any] else {
+                throw ProtectedDownloadError.invalidResponse
+            }
+            guard let manifest = content["signed_manifest"] as? [String: Any],
+                  let grant = content["signed_grant"] as? [String: Any] else {
+                throw ProtectedDownloadError.invalidResponse(at: "DL18")
+            }
+            guard let encoded = content["ciphertext_b64"] as? String,
+                  let ciphertext = Data(base64Encoded: encoded) else {
+                throw ProtectedDownloadError.invalidResponse(at: "DL19")
+            }
+            return (try JSONSerialization.data(withJSONObject: manifest, options: [.sortedKeys, .withoutEscapingSlashes]),
+                    try JSONSerialization.data(withJSONObject: grant, options: [.sortedKeys, .withoutEscapingSlashes]), ciphertext)
         }
-        guard let encoded = content["ciphertext_b64"] as? String,
-              let ciphertext = Data(base64Encoded: encoded) else {
-            throw ProtectedDownloadError.invalidResponse(at: "DL19")
-        }
+        let (manifestData, grantDataJSON, ciphertext) = prepared
+        let manifest = try JSONSerialization.jsonObject(with: manifestData)
         try requireCurrentLicense(auth)
         guard let identity, let deviceID = try identity.persistedEnrollmentID() else {
             throw DeviceIdentityError.identityMissing
         }
-        let manifestData = try JSONSerialization.data(withJSONObject: manifest,
-            options: [.sortedKeys, .withoutEscapingSlashes])
-        let grantDataJSON = try JSONSerialization.data(withJSONObject: grant,
-            options: [.sortedKeys, .withoutEscapingSlashes])
         let manifestBody = try ProtectedArtifactDecoder.shared.verifyManifest(manifestData)
         try validateDescriptor(descriptor, manifest: manifestBody, signedDocument: manifest)
         let decoder = ProtectedArtifactDecoder(verifier: .shared, recipientIdentity: {
@@ -898,17 +902,21 @@ final class ProtectedDownloadService: ObservableObject {
             return (id, publicKey)
         }, sharedSecret: { try identity.agreementSharedSecret(peerPublicKeyX963: $0) })
         try await AppIntegrityRuntime.shared.requireAllowed(force:true)
-        let plaintext = try decoder.decrypt(signedManifest: manifestData,
-            signedGrant: grantDataJSON, ciphertext: ciphertext, recipientID: deviceID, sessionID: sessionID,
+        let boundSessionID = sessionID
+        let plaintext = try await DirectPatchPreparation.run {
+          let plaintext = try decoder.decrypt(signedManifest: manifestData,
+            signedGrant: grantDataJSON, ciphertext: ciphertext, recipientID: deviceID, sessionID: boundSessionID,
             requestNonce: nonce, expectedArtifactID: descriptor.artifactID, expectedGrantID: grantID,
             now: contentTime?.verificationDate(at: ProcessInfo.processInfo.systemUptime) ?? Date())
+          guard SHA256.hash(data: plaintext).map({ String(format: "%02x", $0) }).joined() == descriptor.fileHash else {
+              throw ProtectedDownloadError.invalidResponse(at: "DL20")
+          }
+          guard plaintext.count == descriptor.fileSize else { throw ProtectedDownloadError.invalidResponse(at: "DL21") }
+          return plaintext
+        }
         try await AppIntegrityRuntime.shared.requireAllowed(force:true)
         try requireCurrentLicense(auth)
         guard licenseDigest == initialLicenseDigest else { throw FeaturePatchError.notAuthenticated }
-        guard SHA256.hash(data: plaintext).map({ String(format: "%02x", $0) }).joined() == descriptor.fileHash else {
-            throw ProtectedDownloadError.invalidResponse(at: "DL20")
-        }
-        guard plaintext.count == descriptor.fileSize else { throw ProtectedDownloadError.invalidResponse(at: "DL21") }
         return ProtectedCodePatchDownload(data: plaintext, fileName: manifestBody.fileName)
     }
 

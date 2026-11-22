@@ -2062,10 +2062,10 @@ enum DevicePatchService {
         PatchTransaction.appliedTargetKeys(backupRoot: try PatchProjectLibrary.backupRootURL(), excludingProjectID: nil)
     }
     static func prepareContainers(bundleIDs: [String]) async throws -> [String: URL] {
-        if ExploitSupportPolicy.currentAccessProvider == .worseQuery {
-            try await IOS27ContainerPreparation.shared.prepareAdditionalTargets(bundleIDs: bundleIDs)
-        }
-        let work = Task.detached(priority: .userInitiated) {
+        try await DirectPatchPreparation.run {
+            if ExploitSupportPolicy.currentAccessProvider == .worseQuery {
+                try await IOS27ContainerPreparation.shared.prepareAdditionalTargets(bundleIDs: bundleIDs)
+            }
             var roots: [String: URL] = [:]
             for bundleID in bundleIDs {
                 try Task.checkCancellation()
@@ -2077,8 +2077,6 @@ enum DevicePatchService {
             }
             return roots
         }
-        return try await withTaskCancellationHandler(operation: { try await work.value },
-                                                      onCancel: { work.cancel() })
     }
 
     static func prepareContainers(receipt: PatchTransactionReceipt) async throws -> [String: URL] {

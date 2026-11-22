@@ -43,6 +43,8 @@ def production_sources():
     source = (ROOT / 'ThreeOneOSFive/helpers/FeaturePatchService.swift').read_text(encoding='utf-8')
     transaction = (ROOT / 'ThreeOneOSFive/helpers/PatchTransaction.swift').read_text(encoding='utf-8')
     code = 'import Foundation\n'
+    executor = (ROOT / 'ThreeOneOSFive/helpers/DirectPatchExecutor.swift').read_text(encoding='utf-8')
+    code += executor.split('// BEGIN READ-ONLY PATCH PREPARATION', 1)[1].split('// END READ-ONLY PATCH PREPARATION', 1)[0]
     code += source.split('// BEGIN CATALOG OPERATION PROGRESS', 1)[1].split('// END CATALOG OPERATION PROGRESS', 1)[0].split('\n', 1)[1]
     code += source[source.index('struct PatchRecoveryItem:'):source.index('struct PatchCategory:')]
     code += transaction[transaction.index('struct PatchTransactionReceipt:'):transaction.index('enum PatchTransaction {')]
@@ -83,7 +85,7 @@ func localPatchURL(_ patch:PatchItem)->URL { Fixture.root.appendingPathComponent
 func downloadPatch(_ patch:PatchItem,auth:AuthManager)async throws->URL {
   Fixture.downloads += 1
   let url=Fixture.root.appendingPathComponent("download-"+UUID().uuidString)
-  try Data([1]).write(to:url)
+  try JSONEncoder().encode(Fixture.nextProject).write(to:url)
   return url
 }
 '''

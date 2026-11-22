@@ -504,6 +504,25 @@ enum ContainerStore {
             try check(PatchTransaction.latestRecordedApplicationState(projectID: patch.id, backupRoot: backup) == .off, "directory-only recovery can terminate without inventing files")
         }
         do {
+            let (game, backup) = try fixture("write-deadline")
+            let patch = project(["a", "b"])
+            for rule in patch.rules { try original.write(to: game.appendingPathComponent(rule.relativePath)) }
+            var deadlineFailed = false
+            do {
+                _ = try await DirectPatchExecutor.run(timeout: 1.0, validation: {}) {
+                    try PatchTransaction.apply(project: patch, backupRoot: backup, containerResolver: { _ in game },
+                        beforeWrite: { if $0 == 1 { Thread.sleep(forTimeInterval: 1.1) } })
+                }
+            } catch { deadlineFailed = true }
+            try check(deadlineFailed, "expired write returned success")
+            for rule in patch.rules {
+                try check(try Data(contentsOf: game.appendingPathComponent(rule.relativePath)) == original,
+                    "expired write must finish rollback before releasing the caller")
+            }
+            try check(PatchTransaction.latestRecordedApplicationState(projectID: patch.id, backupRoot: backup) == .off,
+                "expired write must leave a durable rolled-back state")
+        }
+        do {
             let (game, backup) = try fixture("independent-overwrite")
             let file = game.appendingPathComponent("Documents/shared")
             try Data([0]).write(to: file)

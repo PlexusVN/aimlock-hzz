@@ -555,7 +555,8 @@ struct FeaturesView: View {
         guard !Task.isCancelled, !FeaturePatchService.isPatchOperationCancellation(error) else { return }
         Haptics.error()
         activeToast = ToastInfo(title: title,
-                              message: "Không hoàn tất được thao tác. Vui lòng kiểm tra quyền truy cập và thử lại.",
+                              message: (error as? DirectPatchExecutionError)?.errorDescription
+                                ?? "Không hoàn tất được thao tác. Vui lòng kiểm tra quyền truy cập và thử lại.",
                               isSuccess: false)
     }
 }

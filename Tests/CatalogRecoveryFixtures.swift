@@ -27,7 +27,7 @@ extension PatchProject {
 struct Decoded { let project:PatchProject }
 struct Summary { let packageID:UUID }
 enum PatchPackageCodec {
-    @MainActor static func decode(_ data:Data,password:String?)throws->Decoded { Decoded(project:Fixture.nextProject) }
+    static func decode(_ data:Data,password:String?)throws->Decoded { Decoded(project:try JSONDecoder().decode(PatchProject.self,from:data)) }
     @MainActor static func inspect(_ data:Data)throws->Summary { Summary(packageID:Fixture.nextProject.id) }
 }
 enum AppSecurityConfiguration {

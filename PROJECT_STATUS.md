@@ -1,3 +1,7 @@
+## Build 2.4 (50): Giữ giao diện phản hồi khi bật patch trực tiếp
+
+Tách JSON/base64, giải mã artifact, checksum, staging và decode .3105 khỏi MainActor. Chuẩn bị thư mục có giới hạn chờ 45 giây; nếu OS chưa trả về thì giữ một slot cách ly, từ chối lượt chuẩn bị mới và bỏ kết quả muộn. Timeout/hủy chuẩn bị không cho phép worker chạy tiếp vào ghi file. Direct writer kiểm tra hạn 180 giây tại các điểm kiểm tra hiện có; vẫn đợi native I/O và rollback kết thúc trước khi nhả khóa, không giả lập việc hủy syscall. UI hiện đúng bước target/access và thông báo nếu thao tác lâu hơn 15 giây. Kiểm thử timeout/cancel/late-result/retry và rollback filesystem được giữ trong regression macOS. Chưa xác nhận tái hiện trên iPhone gặp lỗi.
+
 ## Build 2.4 (49): Công tắc catalog độc lập và thông báo không lộ đường dẫn
 
 Mỗi lần ON có journal local riêng, ghi đè file hiện tại theo Bundle ID/path trong gói, cho phép các chức năng trùng target. OFF không hỏi xác nhận; bỏ qua target thuộc giao dịch bật sau, còn target do chính lần bật này sở hữu được trả về snapshot trước lần bật. OFF AirLift chỉ đổi trạng thái yêu cầu vì engine không có API đọc backup. Giữ chế độ giao dịch nghiêm ngặt cho workspace cá nhân và bộ regression legacy riêng. UI lỗi/log không đưa đường dẫn ra ngoài. Kiểm thử mới dùng công tắc thực và temporary filesystem trên macOS.
