@@ -408,6 +408,21 @@ struct FeaturesView: View {
                 try await service.applyPatch(patch, auth: authManager)
                 showSuccess(title: "Bật chức năng thành công", message: "Chức năng đang bật.")
             } catch {
+                if let projectID = PatchRestoreError.unassociatedProjectID(error), !Task.isCancelled,
+                   authManager.authenticationRevision == requestedRevision {
+                    do {
+                        guard let item = service.recoveryItems.first(where: { $0.projectID == projectID }) else {
+                            throw PatchRestoreError.missingReceipt
+                        }
+                        let confirmation = try await service.inspectRecoveryRestore(item, auth: authManager)
+                        try Task.checkCancellation()
+                        guard authManager.authenticationRevision == requestedRevision else { return }
+                        pendingRestore = FeatureRestoreReview(target: .recovery(item),
+                            confirmation: confirmation, requestedRevision: requestedRevision,
+                            reenablePatch: patch)
+                    } catch { showFailure(error, title: "Chưa thể kiểm tra bản khôi phục") }
+                    return
+                }
                 if PatchRestoreError.requiresRestoreReview(error), !Task.isCancelled,
                    authManager.authenticationRevision == requestedRevision {
                     do {
@@ -472,8 +487,19 @@ struct FeaturesView: View {
                 // The service binds this review to receipt, authentication and
                 // inspected bytes; a later change requires another inspection.
                 if let patch = review.reenablePatch {
-                    try await service.applyPatch(patch, auth: authManager,
+                    if case .recovery = review.target {
+                        // This receipt has no catalog binding. Restore it as
+                        // its own operation; do not reassign or delete history.
+                        try await restore(review.target, confirmation: review.confirmation)
+                        try Task.checkCancellation()
+                        guard authManager.authenticationRevision == review.requestedRevision else {
+                            throw FeaturePatchError.notAuthenticated
+                        }
+                        try await service.applyPatch(patch, auth: authManager)
+                    } else {
+                        try await service.applyPatch(patch, auth: authManager,
                                                  recoveryConfirmation: review.confirmation)
+                    }
                     showSuccess(title: "Bật chức năng thành công", message: "Chức năng đang bật.")
                 } else {
                     try await restore(review.target, confirmation: review.confirmation)
@@ -572,7 +598,7 @@ private struct RestoreReviewSheet: View {
                 .font(.system(size: 14, weight: .semibold))
                 .foregroundStyle(AppTheme.gamingText)
             Text(review.confirmation.changedPaths.isEmpty
-                 ? "Lần tắt trước chưa khôi phục xong. Xác nhận để trả lại bản sao lưu trước lần áp dụng, sau đó bật lại chức năng."
+                 ? "Gói này còn lịch sử áp dụng chưa khôi phục xong. Xác nhận để trả lại bản sao lưu cũ, sau đó bật lại chức năng."
                  : "Game hoặc ứng dụng đã sửa các mục dưới đây sau lần bật. Khôi phục sẽ thay thế dữ liệu hiện tại bằng bản sao lưu trước lần áp dụng; các thay đổi mới hơn ở những mục này sẽ mất.")
                 .font(.system(size: 13))
                 .foregroundStyle(AppTheme.gamingTextSecondary)

@@ -1,3 +1,7 @@
+## Build 2.4 (47): Khôi phục lịch sử gói chưa gắn catalog
+
+Sửa đường bật bị kẹt P03 khi package ID tải về đã có lịch sử local nhưng thiếu association với catalog hiện tại. Không tự nhận lại journal hoặc tạo baseline mới: UI mở bảng xác nhận hiện có cho receipt độc lập, xác minh snapshot/phiên trước restore, chỉ apply sau restore thành công. Không xóa backup hoặc thay core transaction. Regression luồng UI tăng lên 57 assertions.
+
 ## Build 2.4 (46): Ảnh chức năng từ server
 
 Ưu tiên ảnh riêng từ catalog, dùng ảnh danh mục dự phòng; cache gắn với URL hiện tại, bỏ phản hồi cũ hoặc đã hủy. Tải ảnh nền không giữ luồng sync. Thêm kiểm thử các hàm Swift thật với transport và bộ giải mã ảnh cô lập. Backend và trang reset HWID được triển khai riêng trên VPS.

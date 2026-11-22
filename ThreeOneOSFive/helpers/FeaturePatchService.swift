@@ -876,13 +876,16 @@ final class FeaturePatchService: ObservableObject {
             let decoded = try PatchPackageCodec.decode(data, password: nil)
             var project = decoded.project
             project.isPrivate = true
-            let incomingState = StorageEngineCoordinator.shared.projectApplicationState(project.id)
-            guard incomingState == nil || incomingState == .off || project.id == activeProjectID else {
-                throw PatchRestoreError.recoveryRequired
-            }
             stage = .target
             updatePatchOperation(.target)
             try validateCatalogPackageTargets(project, variant: patch.artifactVariant ?? "")
+            let incomingState = StorageEngineCoordinator.shared.projectApplicationState(project.id)
+            guard incomingState == nil || incomingState == .off || project.id == activeProjectID else {
+                // Never adopt an unassociated journal or capture its patched
+                // bytes as a baseline. Offer its independent recovery receipt
+                // through an explicit review instead of stranding the toggle.
+                throw PatchRestoreError.unassociatedHistory(project.id)
+            }
             stage = .access
             updatePatchOperation(.access)
             log("patch engine: iOS=\(AppInfo.versionTuple) build=\(AppInfo.osBuild) worseQueryOS=\(WorseQueryHelper.isOSSupported) worseQueryReady=\(WorseQueryHelper.isAvailable) storage=\(ExploitSupportPolicy.currentStorageMode)")
@@ -2406,6 +2409,17 @@ enum PatchRestoreError: LocalizedError {
     case confirmationExpired
     case retryNeedsRecovery(String)
     case disabledPendingRestore
+    case unassociatedHistory(UUID)
+
+    static func unassociatedProjectID(_ error: Error) -> UUID? {
+        var cause = error
+        for _ in 0..<4 {
+            guard let wrapped = cause as? PatchOperationError else { break }
+            cause = wrapped.underlying
+        }
+        if case .unassociatedHistory(let id) = cause as? PatchRestoreError { return id }
+        return nil
+    }
 
     static func requiresRestoreReview(_ error: Error) -> Bool {
         var cause = error
@@ -2425,6 +2439,8 @@ enum PatchRestoreError: LocalizedError {
             return "Không tìm thấy bản sao lưu để khôi phục. Trạng thái đang bật được giữ nguyên; hãy kiểm tra dữ liệu hoặc liên hệ hỗ trợ."
         case .recoveryRequired:
             return "Có giao dịch cũ hoặc dữ liệu đã thay đổi. Hãy kiểm tra và khôi phục bản sao lưu của lần áp dụng trước khi bật lại."
+        case .unassociatedHistory:
+            return "Gói này còn lịch sử áp dụng trên thiết bị. Cần xác nhận khôi phục bản sao lưu cũ trước khi bật lại."
         case .confirmationExpired:
             return "Dữ liệu hoặc phiên đăng nhập đã thay đổi từ lúc kiểm tra. Hãy kiểm tra lại bản khôi phục trước khi xác nhận."
         case .retryNeedsRecovery(let detail):

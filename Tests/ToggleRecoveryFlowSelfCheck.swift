@@ -158,6 +158,59 @@ import Foundation
                   "Missing receipt was presented as a restorable confirmation")
         try check(!missing.isPatchEnabled(item) && Fixture.applies == 0 && Fixture.restores == 0,
                   "Missing receipt recovery mutated files or enabled the toggle")
+        // Screenshot P03: the downloaded package has a live receipt but no
+        // association with the current catalog item. Never adopt it silently.
+        for changedTargets in [false, true] {
+            try Fixture.reset()
+            let orphan = FeaturePatchService(), orphanID = Fixture.nextProject.id
+            try Fixture.establish(orphanID)
+            let oldReceipt = Fixture.receipts[orphanID]!
+            Fixture.changed = changedTargets
+            let orphanUI = ToggleRecoveryHarness(service: orphan, authManager: auth)
+            orphanUI.tap(item)
+            await orphanUI.awaitAction()
+            try check(orphanUI.review?.confirmation.projectID == orphanID,
+                      "Unassociated package history stranded the OFF toggle")
+            try check(orphanUI.review?.confirmation.changedPaths.isEmpty == !changedTargets,
+                      "Unassociated recovery skipped target inspection")
+            try check(orphan.catalogApplications.projectID(for: "catalog_1_ffth") == nil,
+                      "Unconfirmed package history was adopted by current catalog")
+            orphanUI.cancelReview()
+            try check(Fixture.restores == 0 && Fixture.applies == 0 && Fixture.receipts[orphanID] == oldReceipt,
+                      "Cancel changed orphan files or backup")
+            orphanUI.tap(item)
+            await orphanUI.awaitAction()
+            orphanUI.confirmReview()
+            await orphanUI.awaitAction()
+            try check(Fixture.restores == 1 && Fixture.applies == 1 && orphan.isPatchEnabled(item),
+                      "Confirmed orphan recovery did not restore then apply")
+            try check(Fixture.forcedRestore == changedTargets,
+                      "Unassociated recovery invented or lost changed-target permission")
+            try check(FileManager.default.fileExists(atPath: oldReceipt.journalURL.path),
+                      "Unassociated recovery deleted old backup evidence")
+        }
+        try Fixture.reset()
+        let failedOrphan = FeaturePatchService(), failedID = Fixture.nextProject.id
+        try Fixture.establish(failedID)
+        let failedUI = ToggleRecoveryHarness(service: failedOrphan, authManager: auth)
+        failedUI.tap(item); await failedUI.awaitAction()
+        Fixture.failRestore = true
+        failedUI.confirmReview(); await failedUI.awaitAction()
+        try check(Fixture.applies == 0 && Fixture.states[failedID] == .applied,
+                  "Failed unassociated restore continued to fresh apply")
+        try check(failedUI.toast?.isSuccess == false && Fixture.receipts[failedID] != nil,
+                  "Failed unassociated restore lost receipt or reported success")
+
+        try Fixture.reset()
+        let staleOrphan = FeaturePatchService(), staleID = Fixture.nextProject.id
+        try Fixture.establish(staleID)
+        let staleUI = ToggleRecoveryHarness(service: staleOrphan, authManager: auth)
+        staleUI.tap(item); await staleUI.awaitAction()
+        auth.authenticationRevision += 1
+        staleUI.confirmReview(); await staleUI.awaitAction()
+        try check(Fixture.restores == 0 && Fixture.applies == 0,
+                  "Stale authentication accepted unassociated recovery confirmation")
+
         try await cancellationDuringRecovery(CancellationError(), label: "CancellationError")
         try await cancellationDuringRecovery(URLError(.cancelled), label: "URLError.cancelled")
         print("Actual toggle/restore review flow: \(checks) checks passed")
