@@ -532,7 +532,7 @@ enum ContainerStore {
                 containerResolver: { _ in game })
             try check(try Data(contentsOf: file) == Data([2]), "turning earlier feature OFF must preserve later writer")
             try check(!fm.fileExists(atPath: game.appendingPathComponent("Documents/only-a").path), "OFF must restore its own non-overlapping targets")
-            try check(try PatchTransaction.recordedApplicationState(receipt: a) == .off, "earlier feature must turn OFF")
+            try check(PatchTransaction.latestRecordedApplicationState(projectID: first.id, backupRoot: backup) == .off, "earlier feature must turn OFF")
             try PatchTransaction.restore(receipt: b, allowChangedTargets: true, preserveLaterPatches: true,
                 containerResolver: { _ in game })
             try check(try Data(contentsOf: file) == Data([1]), "OFF restores the latest feature's own pre-activation snapshot")
