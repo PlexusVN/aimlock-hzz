@@ -48,7 +48,8 @@ final class ContainerScanProgress: ObservableObject {
            size <= 256 * 1024,
            let data = try? Data(contentsOf: historyURL),
            var previous = try? JSONDecoder().decode(ContainerScanSnapshot.self, from: data) {
-            previous.logs = Array(previous.logs.suffix(200))
+            previous.logs = Array(previous.logs.suffix(200)).map(Self.publicMessage)
+            previous.detail = Self.publicMessage(previous.detail)
             if previous.phase == .scanning {
                 previous.phase = .interrupted
                 previous.detail = "Phiên quét trước chưa hoàn tất. Aimlock Hzz sẽ không tự chạy lại khi mở app."
@@ -61,6 +62,14 @@ final class ContainerScanProgress: ObservableObject {
     static var defaultHistoryURL: URL? {
         FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first?
             .appendingPathComponent("Astra", isDirectory: true).appendingPathComponent("ContainerScanHistory.json")
+    }
+
+    /// Used at display, persistence and clipboard boundaries, including old history.
+    static func publicMessage(_ message: String) -> String {
+        guard !message.contains("/"), !message.contains("\\") else {
+            return "Chi tiết nội bộ đã được ẩn. Vui lòng thử lại nếu thao tác chưa hoàn tất."
+        }
+        return message
     }
 
     func track<T>(bundleID: String, successMessage: String = "Đã tìm thấy thư mục dữ liệu. Aimlock Hzz tiếp tục thao tác bạn đã chọn.", operation: (UUID) throws -> T) throws -> T {
@@ -168,7 +177,7 @@ final class ContainerScanProgress: ObservableObject {
         onMain {
             guard self.snapshot.id == id else { return }
             self.snapshot.phase = phase
-            self.snapshot.detail = detail
+            self.snapshot.detail = Self.publicMessage(detail)
             self.cancelPending = false
             self.append(detail)
             self.saveHistory(force: true)
@@ -178,7 +187,7 @@ final class ContainerScanProgress: ObservableObject {
     private func append(_ message: String) {
         let formatter = DateFormatter()
         formatter.dateFormat = "HH:mm:ss"
-        snapshot.logs.append("[\(formatter.string(from: Date()))] \(message)")
+        snapshot.logs.append("[\(formatter.string(from: Date()))] \(Self.publicMessage(message))")
         if snapshot.logs.count > 200 { snapshot.logs.removeFirst(snapshot.logs.count - 200) }
     }
 

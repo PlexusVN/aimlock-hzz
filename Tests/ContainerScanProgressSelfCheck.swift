@@ -24,6 +24,7 @@ enum ScanFixtureError: LocalizedError {
         let path = try await Task.detached {
             try model.track(bundleID: "com.fixture.game") { id in
                 model.report(id, scanned: 2_000_000, total: 3_000_000, candidates: 15, grants: 12, message: "fixture real range")
+                model.checkpoint(id, message: "native path: /fixture/game/Documents/private-file")
                 return "/fixture/game"
             }
         }.value
@@ -32,6 +33,7 @@ enum ScanFixtureError: LocalizedError {
         precondition(model.snapshot.scanned == 2_000_000 && model.snapshot.grants == 12)
         precondition(abs(model.snapshot.fraction - 2.0 / 3.0) < 0.001 && model.isPresented)
         precondition(model.shareText.contains("fixture real range"))
+        precondition(!model.shareText.contains("/fixture"), "native paths must not reach UI or clipboard")
         model.dismiss(); await drainMainQueue()
         precondition(!model.isPresented)
         model.showHistory(); await drainMainQueue()
@@ -87,11 +89,13 @@ enum ScanFixtureError: LocalizedError {
         durable.checkpoint(UUID(), message: "flush completed history writes")
         var interrupted = ContainerScanSnapshot(id: UUID(), bundleID: "com.fixture.game", phase: .scanning)
         interrupted.scanned = 750_000; interrupted.total = 2_000_000
-        interrupted.logs = ["saved real progress"]
+        interrupted.logs = ["saved real progress", "old path: C:\\fixture\\private-file"]
+        interrupted.detail = "/fixture/private-file"
         try JSONEncoder().encode(interrupted).write(to: history)
         let restored = ContainerScanProgress(historyURL: history)
         precondition(restored.snapshot.phase == .interrupted && !restored.isPresented)
         precondition(restored.snapshot.scanned == 750_000 && restored.snapshot.logs.contains("saved real progress"))
+        precondition(!restored.snapshot.detail.contains("/fixture") && !restored.shareText.contains("C:\\fixture"), "old stored paths must be hidden")
         try Data("corrupt history".utf8).write(to: history)
         precondition(ContainerScanProgress(historyURL: history).snapshot.phase == .idle)
         print("[PASS] production scan monitor: background reports, UI-thread publication, success/failure/cancel, bounded logs, copied history and interrupted restart without auto-scan")

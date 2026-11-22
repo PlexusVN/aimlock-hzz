@@ -30,9 +30,9 @@ struct ContainerScanProgressView: View {
                     Spacer()
                     if state.phase == .scanning || isPreparing { ProgressView().tint(AppTheme.gamingBlueBright) }
                 }
-                Text(preparationError ?? (preparationReady ? "Đã quét thư mục có thể truy cập. Chọn Vào ứng dụng để tiếp tục; không cần tìm thấy game ở bước này." : state.phase == .scanning || isPreparing
+                Text(ContainerScanProgress.publicMessage(preparationError ?? (preparationReady ? "Đã quét thư mục có thể truy cập. Chọn Vào ứng dụng để tiếp tục; không cần tìm thấy game ở bước này." : state.phase == .scanning || isPreparing
                      ? "Lần đầu có thể mất vài phút hoặc lâu hơn. Giữ Aimlock Hzz ở màn hình này; lần sau sẽ dùng đường dẫn đã lưu nếu còn hợp lệ."
-                     : state.detail.isEmpty ? "Chuẩn bị worse_query trước khi vào màn hình Chức năng." : state.detail))
+                     : state.detail.isEmpty ? "Chuẩn bị worse_query trước khi vào màn hình Chức năng." : state.detail)))
                     .font(.subheadline).foregroundColor(AppTheme.gamingTextSecondary)
                     .fixedSize(horizontal: false, vertical: true)
                 if !state.bundleID.isEmpty {
@@ -159,7 +159,8 @@ struct IOS27PreparationView: View {
 
                     preparationProgress
 
-                    if let failure = preparation.failure {
+                    if let rawFailure = preparation.failure {
+                        let failure = ContainerScanProgress.publicMessage(rawFailure)
                         VStack(alignment: .leading, spacing: 12) {
                             Label("Không thể chuẩn bị \(platformLabel)", systemImage: "exclamationmark.circle.fill")
                                 .font(.subheadline.bold())
