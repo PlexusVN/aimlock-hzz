@@ -381,6 +381,10 @@ final class FeaturePatchService: ObservableObject {
             let roots: [String: URL]? = StorageEngineCoordinator.shared.isAirLiftActive ? nil
                 : try await DevicePatchService.prepareContainers(bundleIDs: project.allBundleIdentifiers)
             self.updatePatchOperation(.access)
+            let access: PreparedPatchAccess?
+            if let roots { access = try await DevicePatchService.prepareAccess(roots: roots) }
+            else { access = nil }
+            defer { if let access { Task.detached(priority: .utility) { access.release() } } }
             let generation = try await NetworkAccessGate.shared.requireAllowed()
             try await AppIntegrityRuntime.shared.requireAllowed(force: true)
             try Task.checkCancellation()
@@ -406,7 +410,7 @@ final class FeaturePatchService: ObservableObject {
                 }) {
                     try IntegrityCommitBarrier.withCommit {
                         try DevicePatchService.apply(project: payload, preparedContainers: roots,
-                            allowOverlappingTargets: true)
+                            allowOverlappingTargets: true, preparedAccess: access)
                     }
                 }
             }
@@ -1353,6 +1357,9 @@ final class FeaturePatchService: ObservableObject {
             try await AppIntegrityRuntime.shared.requireAllowed(force: true)
             updatePatchOperation(.target)
             let roots = try await DevicePatchService.prepareContainers(receipt: receipt)
+            updatePatchOperation(.access)
+            let access = try await DevicePatchService.prepareAccess(roots: roots)
+            defer { Task.detached(priority: .utility) { access.release() } }
             try Task.checkCancellation()
             let allowChangedTargets = confirmation.map { !$0.changedPaths.isEmpty } ?? false
             let expectedCurrentState = independentCatalogToggles ? nil : confirmation?.currentStateSnapshot
@@ -1367,7 +1374,7 @@ final class FeaturePatchService: ObservableObject {
                 try IntegrityCommitBarrier.withCommit {
                     try DevicePatchService.restore(receipt: receipt, allowChangedTargets: preserveLater || allowChangedTargets,
                         expectedCurrentState: expectedCurrentState, preparedContainers: roots,
-                        preserveLaterPatches: preserveLater)
+                        preserveLaterPatches: preserveLater, preparedAccess: access)
                 }
             }
         }

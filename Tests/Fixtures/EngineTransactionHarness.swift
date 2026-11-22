@@ -89,7 +89,9 @@ enum DirectPatchExecutor {
     }
 }
 enum IntegrityCommitBarrier { static func withCommit<T>(_ operation:() throws -> T) rethrows -> T { try operation() } }
+final class PreparedPatchAccess: @unchecked Sendable { func release() {} }
 enum DevicePatchService {
+    static func prepareAccess(roots:[String:URL]) async throws -> PreparedPatchAccess { PreparedPatchAccess() }
     static func activeTargetKeys() throws -> Set<String> { [] }
     @MainActor static func prepareContainers(bundleIDs:[String]) async throws -> [String:URL] { [:] }
     @MainActor static func apply(project:PatchProject,preparedContainers:[String:URL]?,allowOverlappingTargets:Bool = false) throws { Fixture.directWrites += 1 }
@@ -97,7 +99,7 @@ enum DevicePatchService {
     @MainActor static func latestReceipt(projectID:UUID)->PatchTransactionReceipt? { Fixture.receipt }
     @MainActor static func prepareContainers(receipt:PatchTransactionReceipt) async throws -> [String:URL] { [:] }
     @MainActor static func restore(receipt:PatchTransactionReceipt,allowChangedTargets:Bool,
-                                   expectedCurrentState:Data? = nil, preparedContainers:[String:URL], preserveLaterPatches:Bool = false) throws {
+                                   expectedCurrentState:Data? = nil, preparedContainers:[String:URL], preserveLaterPatches:Bool = false, preparedAccess:PreparedPatchAccess? = nil) throws {
         Fixture.restores += 1;Fixture.journal = .off
         if var record=try Fixture.store.read(receipt.projectID) { record.phase = .restored; try Fixture.store.save(record) }
     }

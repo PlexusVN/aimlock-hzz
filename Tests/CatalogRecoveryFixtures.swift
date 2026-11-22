@@ -110,7 +110,9 @@ enum DirectPatchExecutor {
     }
 }
 @MainActor enum PatchProjectLibrary { static func backupRootURL()throws->URL { Fixture.root } }
+final class PreparedPatchAccess: @unchecked Sendable { func release() {} }
 @MainActor enum DevicePatchService {
+    static func prepareAccess(roots:[String:URL]) async throws -> PreparedPatchAccess { PreparedPatchAccess() }
     static func latestReceipt(projectID:UUID)->PatchTransactionReceipt? {
         Fixture.states[projectID] == .off ? nil : Fixture.receipts[projectID]
     }
@@ -125,14 +127,14 @@ enum DirectPatchExecutor {
         if Fixture.failInspect { throw CatalogCheckError.writeFailure }
         return PatchRestoreInspection(changedTargets:Fixture.changed ? [PatchTargetChange(bundleID:"com.dts.freefireth",relativePath:"Documents/file",kind:.modified)]:[],currentStateSnapshot:Fixture.snapshot)
     }
-    static func apply(project:PatchProject,preparedContainers:[String:URL]?,allowOverlappingTargets:Bool = false)throws {
+    static func apply(project:PatchProject,preparedContainers:[String:URL]?,allowOverlappingTargets:Bool = false,preparedAccess:PreparedPatchAccess? = nil)throws {
         Fixture.applies += 1
         if Fixture.failApply { throw CatalogCheckError.writeFailure }
         try Fixture.establish(project.id,state:Fixture.partialApply ? .recoveryRequired:.applied)
         if Fixture.partialApply { throw CatalogCheckError.writeFailure }
     }
     static func restore(receipt:PatchTransactionReceipt,allowChangedTargets:Bool,
-                        expectedCurrentState:Data?,preparedContainers:[String:URL],preserveLaterPatches:Bool = false)throws {
+                        expectedCurrentState:Data?,preparedContainers:[String:URL],preserveLaterPatches:Bool = false,preparedAccess:PreparedPatchAccess? = nil)throws {
         if Fixture.failRestore { throw CatalogCheckError.writeFailure }
         if let expectedCurrentState,expectedCurrentState != Fixture.snapshot {
             throw PatchPackageError.restoreTargetsChanged(["com.dts.freefireth/Documents/file"])

@@ -2057,7 +2057,84 @@ enum PatchTransaction {
 
 // MARK: - Device Patch Service
 
+// A read-only preparation owns native grants until the entire transaction ends.
+// A cancelled/late preparation drops this object and releases every acquired handle.
+final class PreparedPatchAccess: @unchecked Sendable {
+    let roots: [String: URL]
+    let usesWorseQuery: Bool
+    private let rootIdentities: [String: String]
+    private let lock = NSLock()
+    private var handles: [Int64]?
+    init(roots: [String: URL], handles: [Int64], usesWorseQuery: Bool) throws {
+        rootIdentities = try roots.mapValues { try Self.identity($0.path) }
+        self.roots = roots; self.handles = handles; self.usesWorseQuery = usesWorseQuery
+    }
+    private static func identity(_ path: String) throws -> String {
+        let attributes = try FileManager.default.attributesOfItem(atPath: path)
+        guard attributes[.type] as? FileAttributeType == .typeDirectory,
+              let device = attributes[.systemNumber] as? NSNumber,
+              let inode = attributes[.systemFileNumber] as? NSNumber else {
+            throw PatchPackageError.restoreFailed
+        }
+        return "\(device):\(inode)"
+    }
+    func requireRoot(bundleID: String, path: String, worseQuery: Bool) throws {
+        lock.lock(); let active = handles != nil; lock.unlock()
+        guard active, usesWorseQuery == worseQuery,
+              roots[bundleID].map({ PatchPathValidator.canonicalFileURL($0).path }) == path,
+              try Self.identity(path) == rootIdentities[bundleID] else {
+            throw PatchPackageError.targetAppUnavailable(bundleID)
+        }
+        if worseQuery {
+            // Recheck local metadata under the retained grant, never another
+            // potentially blocking native identity query after commit starts.
+            let identity = ContainerStore.readWorseQueryIdentity(path)
+            guard identity.readable, !identity.diagnostics.contains("identity=conflict"),
+                  identity.identifier == nil || identity.identifier == bundleID else {
+                throw PatchPackageError.targetAppUnavailable(bundleID)
+            }
+        }
+    }
+    func release() {
+        lock.lock(); let values = handles; handles = nil; lock.unlock()
+        values?.reversed().forEach { sandbox_extension_release_handle($0) }
+    }
+    deinit { release() }
+}
+
 enum DevicePatchService {
+    static func prepareAccess(roots: [String: URL]) async throws -> PreparedPatchAccess {
+        try await DirectPatchPreparation.run {
+            var handles: [Int64] = []
+            var transferred = false
+            defer { if !transferred { handles.reversed().forEach { sandbox_extension_release_handle($0) } } }
+            let worseQuery = WorseQueryHelper.isAvailable
+            for bundleID in roots.keys.sorted() {
+                try Task.checkCancellation()
+                let path = PatchPathValidator.canonicalFileURL(roots[bundleID]!).path
+                guard ContainerStore.isApplicationContainerPath(path) else {
+                    throw PatchPackageError.targetAppUnavailable(bundleID)
+                }
+                if worseQuery {
+                    handles.append(try WorseQueryHelper.acquireAccess(for: path))
+                    guard ContainerStore.validateWorseQueryTransactionIdentity(path: path, bundleID: bundleID) else {
+                        IOS27ContainerSession.invalidate(bundleIDs: [bundleID])
+                        throw PatchPackageError.targetAppUnavailable(bundleID)
+                    }
+                } else {
+                    guard ExploitSupportPolicy.currentAccessProvider == .legacy3105 else {
+                        throw WorseQueryError.appGroupUnavailable
+                    }
+                    let handle = ContainerStore.grantContainerAccess(path)
+                    if handle >= 0 { handles.append(handle) }
+                }
+                try Task.checkCancellation()
+            }
+            let access = try PreparedPatchAccess(roots: roots, handles: handles, usesWorseQuery: worseQuery)
+            transferred = true
+            return access
+        }
+    }
     static func activeTargetKeys() throws -> Set<String> {
         PatchTransaction.appliedTargetKeys(backupRoot: try PatchProjectLibrary.backupRootURL(), excludingProjectID: nil)
     }
@@ -2099,9 +2176,10 @@ enum DevicePatchService {
     }
 
     static func apply(project: PatchProject, preparedContainers: [String: URL]? = nil,
-                      allowOverlappingTargets: Bool = false) throws -> PatchTransactionReceipt {
+                      allowOverlappingTargets: Bool = false,
+                      preparedAccess: PreparedPatchAccess? = nil) throws -> PatchTransactionReceipt {
         let bundleIDs = orderedBundleIdentifiers(in: project)
-        return try withResolvedContainers(bundleIDs: bundleIDs, prepared: preparedContainers) { roots in
+        return try withResolvedContainers(bundleIDs: bundleIDs, prepared: preparedContainers, preparedAccess: preparedAccess) { roots in
             try PatchTransaction.apply(
                 project: project,
                 backupRoot: try PatchProjectLibrary.backupRootURL(),
@@ -2137,10 +2215,11 @@ enum DevicePatchService {
         allowChangedTargets: Bool = false,
         expectedCurrentState: Data? = nil,
         preparedContainers: [String: URL]? = nil,
-        preserveLaterPatches: Bool = false
+        preserveLaterPatches: Bool = false,
+        preparedAccess: PreparedPatchAccess? = nil
     ) throws {
         let bundleIDs = try PatchTransaction.requiredBundleIdentifiers(for: receipt)
-        try withResolvedContainers(bundleIDs: bundleIDs, prepared: preparedContainers) { roots in
+        try withResolvedContainers(bundleIDs: bundleIDs, prepared: preparedContainers, preparedAccess: preparedAccess) { roots in
             try PatchTransaction.restore(
                 receipt: receipt,
                 allowChangedTargets: allowChangedTargets,
@@ -2187,6 +2266,7 @@ enum DevicePatchService {
     private static func withResolvedContainers<T>(
         bundleIDs: [String],
         prepared: [String: URL]? = nil,
+        preparedAccess: PreparedPatchAccess? = nil,
         operation: ([String: URL]) throws -> T
     ) throws -> T {
         var roots: [String: URL] = [:]
@@ -2205,7 +2285,10 @@ enum DevicePatchService {
             guard ContainerStore.isApplicationContainerPath(path) else {
                 throw PatchPackageError.targetAppUnavailable(bundleID)
             }
-            if WorseQueryHelper.isAvailable {
+            if let preparedAccess {
+                let canonical = PatchPathValidator.canonicalFileURL(URL(fileURLWithPath: path, isDirectory: true)).path
+                try preparedAccess.requireRoot(bundleID: bundleID, path: canonical, worseQuery: WorseQueryHelper.isAvailable)
+            } else if WorseQueryHelper.isAvailable {
                 // Throw the actual daemon/token error and hold the grant through
                 // backup, writes, verification, rollback and restore.
                 handles.append(try WorseQueryHelper.acquireAccess(for: path))

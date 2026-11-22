@@ -60,7 +60,7 @@ final class Probe {
         source = (ROOT / 'ThreeOneOSFive/helpers/PatchTransaction.swift').read_text(encoding='utf-8')
         code = '''import Foundation
 enum Failure: Error { case denied }
-enum PatchPackageError: Error { case targetAppUnavailable(String) }
+enum PatchPackageError: Error { case targetAppUnavailable(String), restoreFailed }
 enum WorseQueryError: Error { case appGroupUnavailable }
 enum DirectPatchExecutionContext { static func check() throws {} }
 enum ExploitSupportPolicy { enum Provider { case legacy3105, worseQuery }
@@ -80,7 +80,7 @@ enum WorseQueryHelper {
 }
 enum ContainerStore {
  static func resolveAppContainerForPatch(bundleID:String) throws -> String { "/owned/"+bundleID }
- static func isApplicationContainerPath(_ path:String)->Bool { path.hasPrefix("/owned/") }
+ static func isApplicationContainerPath(_ path:String)->Bool { path.hasPrefix("/owned/") || path.contains("prepared-access-fixture-") }
  static func grantContainerAccess(_ path:String)->Int64 { Calls.next += 1; return Calls.next }
  static func readWorseQueryIdentity(_ path:String)->(identifier:String?,readable:Bool,diagnostics:[String]) {
   Calls.events.append("identity:"+path)
@@ -105,8 +105,15 @@ enum Service {
  static func execute(_ ids:[String]) throws {
   try withResolvedContainers(bundleIDs:ids) { _ in Calls.operationRan=true }
  }
+ static func executePrepared(_ roots:[String:URL], access:PreparedPatchAccess) throws {
+  try withResolvedContainers(bundleIDs:roots.keys.sorted(), prepared:roots, preparedAccess:access) { _ in Calls.operationRan=true }
+ }
 '''
+        code += extract_function(source, 'static func prepareAccess(') + '\n'
         code += extract_function(source, 'private static func withResolvedContainers<T>(') + '\n}\n'
+        code += extract_function(source, 'final class PreparedPatchAccess:') + '\n'
+        executor = (ROOT / 'ThreeOneOSFive/helpers/DirectPatchExecutor.swift').read_text(encoding='utf-8')
+        code += executor.split('// BEGIN READ-ONLY PATCH PREPARATION', 1)[1].split('// END READ-ONLY PATCH PREPARATION', 1)[0]
         self.execute(code, 'ContainerCommitIdentitySelfCheck.swift')
 
 
