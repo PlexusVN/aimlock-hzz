@@ -10,10 +10,12 @@ APP="$WORK/NativeVideoCheck.app"
 mkdir -p "$APP/Backgrounds"
 DEVICE_ID=""
 cleanup() {
+  local result=$?
   if [[ -n "$DEVICE_ID" ]]; then
-    xcrun simctl shutdown "$DEVICE_ID" >/dev/null 2>&1 || true
-    xcrun simctl delete "$DEVICE_ID" >/dev/null 2>&1 || true
+    python3 "$ROOT/ReleaseTools/simulator_cleanup.py" "$DEVICE_ID" \
+      --report "$OUT/cleanup-report.json" || true
   fi
+  return "$result"
 }
 trap cleanup EXIT
 python3 - "$ROOT" "$WORK" "$APP" <<'PY'
