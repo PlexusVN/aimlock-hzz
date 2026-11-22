@@ -11,6 +11,16 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class FeatureImageChecks(unittest.TestCase):
+    def test_cards_use_feature_images_and_sync_refreshes_them(self):
+        ui = (ROOT / 'ThreeOneOSFive/views/FeaturesView.swift').read_text(encoding='utf-8')
+        card = extract_function(ui, 'private var patchImage:')
+        self.assertIn('service.cachedImage(for: patch)', card)
+        self.assertNotIn('categoryImage(', card)
+        self.assertNotIn('AimlockReticleIcon()', card)
+        source = (ROOT / 'ThreeOneOSFive/helpers/FeaturePatchService.swift').read_text(encoding='utf-8')
+        sync = extract_function(source, 'func syncFromServer(')
+        self.assertIn('downloadPatchImageIfNeeded(patch, force: true)', sync)
+
     def test_server_images_cache_replacement_and_late_responses(self):
         compiler = shutil.which('swiftc')
         distro = os.environ.get('ASTRA_SWIFT_WSL_DISTRIBUTION')

@@ -677,17 +677,17 @@ final class FeaturePatchService: ObservableObject {
 
             // Decorative images must not delay authenticated catalog operations.
             catalogImageTask = Task { @MainActor [weak self, weak auth] in
+                for patch in response.patches {
+                    guard let self, let auth, !Task.isCancelled,
+                          auth.authState == .verified, auth.authenticationRevision == authRevision,
+                          self.catalogSyncRevision == syncRevision else { return }
+                    await self.downloadPatchImageIfNeeded(patch, force: true)
+                }
                 for category in response.categories {
                     guard let self, let auth, !Task.isCancelled,
                           auth.authState == .verified, auth.authenticationRevision == authRevision,
                           self.catalogSyncRevision == syncRevision else { return }
                     await self.downloadCategoryImageIfNeeded(category)
-                }
-                for patch in response.patches {
-                    guard let self, let auth, !Task.isCancelled,
-                          auth.authState == .verified, auth.authenticationRevision == authRevision,
-                          self.catalogSyncRevision == syncRevision else { return }
-                    await self.downloadPatchImageIfNeeded(patch)
                 }
             }
         } catch {
@@ -1759,7 +1759,9 @@ final class FeaturePatchService: ObservableObject {
         }
         guard let remoteURL = fullImageURL(for: patch.imageUrl) else { return }
         do {
-            let (data, response) = try await pinnedSession.data(from: remoteURL)
+            var request = URLRequest(url: remoteURL, cachePolicy: .reloadIgnoringLocalCacheData)
+            request.setValue("no-cache", forHTTPHeaderField: "Cache-Control")
+            let (data, response) = try await pinnedSession.data(for: request)
             guard !Task.isCancelled,
                   patches.contains(where: { $0.id == patch.id && $0.imageUrl == patch.imageUrl }),
                   let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode),
@@ -1784,7 +1786,7 @@ final class FeaturePatchService: ObservableObject {
         } else if patchImageCache[patch.id] != nil {
             patchImageCache.removeValue(forKey: patch.id)
         }
-        return categoryImage(for: patch.categoryId)
+        return nil // A category image is not this feature's server-uploaded avatar.
     }
 
     // MARK: - NovaX Native Patch Menu

@@ -21,12 +21,17 @@ struct PatchCategory { let id: Int; let imageUrl: String; var name: String { "Fi
 
 @MainActor final class ImageTransport {
     var calls: [URL] = []
+    var requests: [URLRequest] = []
     var handler: (URL) async throws -> (Data, URLResponse) = { url in
         (Data([1]), HTTPURLResponse(url: url, statusCode: 200, httpVersion: nil, headerFields: nil)!)
     }
     func data(from url: URL) async throws -> (Data, URLResponse) {
         calls.append(url)
         return try await handler(url)
+    }
+    func data(for request: URLRequest) async throws -> (Data, URLResponse) {
+        requests.append(request)
+        return try await data(from: request.url!)
     }
 }
 @MainActor final class ImageService {
@@ -75,7 +80,7 @@ struct PatchCategory { let id: Int; let imageUrl: String; var name: String { "Fi
         s.pinnedSession.handler = { reply($0, 2) }
         await s.downloadCategoryImageIfNeeded(category)
         check(s.pinnedSession.calls.last?.absoluteString == "https://fixture.invalid/category.png", "relative URL uses Auth origin")
-        check(s.cachedImage(for: first)?.bytes == Data([2]), "category fallback while patch has no bytes")
+        check(s.cachedImage(for: first) == nil, "category must not substitute for a feature avatar")
         s.pinnedSession.handler = { reply($0, 3) }
         await s.downloadPatchImageIfNeeded(first)
         check(s.cachedImage(for: first)?.bytes == Data([3]), "own image wins over category")
@@ -88,15 +93,27 @@ struct PatchCategory { let id: Int; let imageUrl: String; var name: String { "Fi
         await s.downloadPatchImageIfNeeded(first)
         check(s.pinnedSession.calls.count == calls, "disk cache avoids redundant transfer")
 
+        s.pinnedSession.handler = { reply($0, 6) }
+        await s.downloadPatchImageIfNeeded(first, force: true)
+        check(s.cachedImage(for: first)?.bytes == Data([6]), "same URL replacement refreshes uploaded bytes")
+        check(s.pinnedSession.requests.last?.cachePolicy == .reloadIgnoringLocalCacheData, "refresh bypasses URL cache")
+        check(s.pinnedSession.requests.last?.value(forHTTPHeaderField: "Cache-Control") == "no-cache", "refresh asks intermediaries to revalidate")
+        let sibling = PatchItem(id: 8, categoryId: 2, imageUrl: "/sibling.png")
+        s.patches = [first, sibling]
+        s.pinnedSession.handler = { reply($0, 8) }
+        await s.downloadPatchImageIfNeeded(sibling)
+        check(s.cachedImage(for: sibling)?.bytes == Data([8]), "same-category feature uses its own image")
+        check(s.cachedImage(for: first)?.bytes == Data([6]), "another feature image does not replace first avatar")
+
         let changed = PatchItem(id: 7, categoryId: 2, imageUrl: "https://fixture.invalid/changed.png")
         s.patches = [changed]
-        check(s.cachedImage(for: changed)?.bytes == Data([2]), "changed URL cannot display old patch cache")
+        check(s.cachedImage(for: changed) == nil, "changed URL cannot display another image")
         s.pinnedSession.handler = { reply($0, 4) }
         await s.downloadPatchImageIfNeeded(changed)
         check(s.cachedImage(for: changed)?.bytes == Data([4]), "changed image replaces cache")
         let removed = PatchItem(id: 7, categoryId: 2, imageUrl: "")
         s.patches = [removed]
-        check(s.cachedImage(for: removed)?.bytes == Data([2]), "removed own image returns category fallback")
+        check(s.cachedImage(for: removed) == nil, "removed own image never returns category fallback")
         let removedCategory = PatchCategory(id: 2, imageUrl: "")
         s.categories = [removedCategory]
         check(s.cachedImage(for: removed) == nil, "removed category image cannot resurrect disk cache")

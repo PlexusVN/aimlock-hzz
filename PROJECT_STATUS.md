@@ -1,3 +1,7 @@
+## Build 2.4 (48): Ảnh riêng cho từng chức năng
+
+Thẻ chức năng chỉ hiển thị image_url riêng từ server; không thay bằng ảnh danh mục hoặc phủ huy hiệu cố định. Đồng bộ tải ảnh chức năng trước danh mục và revalidate bytes kể cả URL không đổi. Ảnh thiếu/lỗi dùng biểu tượng ảnh trống. Thêm kiểm thử hai chức năng cùng danh mục và cập nhật tại cùng URL.
+
 ## Build 2.4 (47): Khôi phục lịch sử gói chưa gắn catalog
 
 Sửa đường bật bị kẹt P03 khi package ID tải về đã có lịch sử local nhưng thiếu association với catalog hiện tại. Không tự nhận lại journal hoặc tạo baseline mới: UI mở bảng xác nhận hiện có cho receipt độc lập, xác minh snapshot/phiên trước restore, chỉ apply sau restore thành công. Không xóa backup hoặc thay core transaction. Regression luồng UI tăng lên 57 assertions.

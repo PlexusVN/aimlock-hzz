@@ -733,13 +733,14 @@ struct PatchCardView: View {
     private var patchImage: some View {
         ZStack(alignment: .bottomTrailing) {
             Group {
-                if let uiImage = service.cachedImage(for: patch) ?? service.categoryImage(for: patch.categoryId) {
+                if let uiImage = service.cachedImage(for: patch) {
                     Image(uiImage: uiImage).resizable().scaledToFill()
                 } else {
                     ZStack {
                         AppTheme.gamingBackgroundRaised
-                        AimlockReticleIcon().frame(width: 25, height: 25)
-                            .foregroundStyle(AppTheme.gamingText)
+                        Image(systemName: "photo")
+                            .font(.system(size: 22))
+                            .foregroundStyle(AppTheme.gamingTextSecondary)
                     }
                 }
             }
@@ -747,12 +748,6 @@ struct PatchCardView: View {
             .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
             .overlay(RoundedRectangle(cornerRadius: 8, style: .continuous).stroke(AppTheme.gamingBorder, lineWidth: 1))
 
-            AimlockReticleIcon()
-                .frame(width: 10, height: 10)
-                .foregroundStyle(AppTheme.gamingBackground)
-                .frame(width: 16, height: 16)
-                .background(AppTheme.gamingText, in: RoundedRectangle(cornerRadius: 4, style: .continuous))
-                .offset(x: 4, y: 4)
         }
         .frame(width: 48, height: 48, alignment: .topLeading)
         .accessibilityHidden(true)
