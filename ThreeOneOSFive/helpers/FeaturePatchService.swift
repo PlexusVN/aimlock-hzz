@@ -755,8 +755,8 @@ final class FeaturePatchService: ObservableObject {
             categories = []; patches = []
             verifiedCatalogVariantsByPatchID = [:]
             verifiedCatalogAuthRevision = nil
-            catalogError = error.localizedDescription
-            nativeStatusMessage = error.localizedDescription
+            catalogError = "Không thể tải danh sách chức năng. Vui lòng thử lại."
+            nativeStatusMessage = catalogError ?? "Không thể tải danh sách chức năng."
             print("[FeaturePatch] protected catalog unavailable")
         }
     }

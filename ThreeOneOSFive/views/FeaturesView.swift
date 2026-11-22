@@ -408,6 +408,10 @@ struct FeaturesView: View {
                 try await service.applyPatch(patch, auth: authManager)
                 showSuccess(title: "Bật chức năng thành công", message: "Chức năng đang bật.")
             } catch {
+                if service.independentCatalogToggles {
+                    showFailure(error, title: "Không thể bật chức năng")
+                    return
+                }
                 if let projectID = PatchRestoreError.unassociatedProjectID(error), !Task.isCancelled,
                    authManager.authenticationRevision == requestedRevision {
                     do {
