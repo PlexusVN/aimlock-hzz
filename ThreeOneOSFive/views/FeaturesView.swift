@@ -454,6 +454,11 @@ struct FeaturesView: View {
         actionTask = Task { @MainActor in
             defer { workingActionID = nil; actionTask = nil }
             do {
+                if service.independentCatalogToggles {
+                    try await restore(target, confirmation: nil)
+                    showSuccess(title: "Đã tắt chức năng", message: "Chức năng đang tắt.")
+                    return
+                }
                 let confirmation: PatchRestoreConfirmation
                 switch target {
                 case .patch(let patch):
@@ -462,7 +467,7 @@ struct FeaturesView: View {
                     confirmation = try await service.inspectRecoveryRestore(item, auth: authManager)
                 }
                 try Task.checkCancellation()
-                if confirmation.changedPaths.isEmpty {
+                if service.independentCatalogToggles || confirmation.changedPaths.isEmpty {
                     try await restore(target, confirmation: confirmation)
                     showRestoreSuccess()
                 } else {
@@ -523,7 +528,7 @@ struct FeaturesView: View {
     }
 
     @MainActor
-    private func restore(_ target: FeatureRestoreTarget, confirmation: PatchRestoreConfirmation) async throws {
+    private func restore(_ target: FeatureRestoreTarget, confirmation: PatchRestoreConfirmation?) async throws {
         switch target {
         case .patch(let patch):
             try await service.restorePatch(patch, auth: authManager, confirmation: confirmation)
@@ -546,8 +551,7 @@ struct FeaturesView: View {
         guard !Task.isCancelled, !FeaturePatchService.isPatchOperationCancellation(error) else { return }
         Haptics.error()
         activeToast = ToastInfo(title: title,
-                              message: (error as? LocalizedError)?.errorDescription
-                                ?? "Thao tác chưa hoàn tất. Bản sao lưu được giữ nguyên.",
+                              message: "Không hoàn tất được thao tác. Vui lòng kiểm tra quyền truy cập và thử lại.",
                               isSuccess: false)
     }
 }
@@ -610,7 +614,7 @@ private struct RestoreReviewSheet: View {
                         HStack(alignment: .top, spacing: 8) {
                             Text("\(index + 1).")
                                 .foregroundStyle(AppTheme.gamingTextSecondary)
-                            Text(path)
+                            Text("Mục dữ liệu \(index + 1)")
                                 .foregroundStyle(AppTheme.gamingText)
                                 .textSelection(.enabled)
                                 .fixedSize(horizontal: false, vertical: true)

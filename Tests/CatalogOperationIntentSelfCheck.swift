@@ -22,6 +22,10 @@ struct PatchOperationError: Error { let underlying: Error }
 // ACTUAL_PROGRESS
 
 @MainActor final class FeaturePatchService {
+    let independentCatalogToggles = false
+    private func applyIndependentCatalogPatch(_ patch: PatchItem, auth: AuthManager) async throws {
+        throw FeaturePatchError.notAuthenticated
+    }
     var applied = 0
     var restored = 0
     var patchOperation: FeaturePatchOperationProgress?
@@ -104,4 +108,8 @@ struct PatchOperationError: Error { let underlying: Error }
         }
         print("[PASS] Catalog apply/restore queued session intent: \(checks) checks")
     }
+}
+@MainActor final class StorageEngineCoordinator {
+    static let shared = StorageEngineCoordinator()
+    let isAirLiftActive = false
 }

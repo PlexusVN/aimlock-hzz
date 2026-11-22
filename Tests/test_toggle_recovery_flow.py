@@ -74,6 +74,7 @@ struct ToastInfo {
     var toast: ToastInfo? { activeToast }
     func cancelReview() { pendingRestore = nil }
     func confirmReview() { if let review = pendingRestore { confirmRestore(review) } }
+    func showFixtureFailure(_ error: Error) { showFailure(error, title: "Không thể bật chức năng") }
 }
 extension ToggleRecoveryHarness {
 '''

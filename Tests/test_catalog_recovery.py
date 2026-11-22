@@ -9,6 +9,7 @@ from check_airlift_pairing_finish import extract_function
 
 ROOT = Path(__file__).resolve().parents[1]
 METHODS = [
+    'private func applyIndependentCatalogPatch(',
     'func cancelPatchOperation(identity:', 'private func cancelPatchOperation(operationID:',
     'private func markPatchCancellationPending(', 'private func updatePatchOperation(',
     'private func beginPatchCommit(', 'static func isPatchOperationCancellation(',
@@ -56,6 +57,8 @@ def production_sources():
     code += '}\n'
     code += '''
 @MainActor final class FeaturePatchService {
+// Retain explicit legacy recovery regression coverage alongside the new mode.
+var independentCatalogToggles = false
 var defaults:UserDefaults { Fixture.defaults }
 var catalogApplications:CatalogPatchApplicationRegistry { CatalogPatchApplicationRegistry(defaults:defaults) }
 var patchProjectsDir:URL { Fixture.root }

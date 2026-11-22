@@ -173,7 +173,8 @@ final class StorageEngineCoordinator: ObservableObject {
     }
 
     /// Caller already owns the shared filesystem operation. Never reacquire it.
-    func applyPatchProjectInOperation(_ project: PatchProject, operationID: UUID) async throws {
+    func applyPatchProjectInOperation(_ project: PatchProject, operationID: UUID,
+                                      allowOverlappingTargets: Bool = false) async throws {
         try await PatchFilesystemGate.shared.validate(operationID)
         try await AppIntegrityRuntime.shared.requireAllowed(force:true)
         try PatchPackageCodec.validate(project)
@@ -190,7 +191,8 @@ final class StorageEngineCoordinator: ObservableObject {
             try Task.checkCancellation()
             try NetworkAccessGate.shared.validateGeneration(networkGeneration)
             _ = try await DirectPatchExecutor.run(validation: { try NetworkAccessGate.shared.validateGeneration(networkGeneration) }) {
-                try IntegrityCommitBarrier.withCommit { try DevicePatchService.apply(project: project, preparedContainers: roots) }
+                try IntegrityCommitBarrier.withCommit { try DevicePatchService.apply(project: project, preparedContainers: roots,
+                    allowOverlappingTargets: allowOverlappingTargets) }
             }
             return
         }
@@ -200,7 +202,7 @@ final class StorageEngineCoordinator: ObservableObject {
         }
         try AirLiftPatchCapabilities.validate(project)
         let store = try applicationStore()
-        try store.requireResolvedLegacyHistory()
+        if !allowOverlappingTargets { try store.requireResolvedLegacyHistory() }
         let previousRecord = try store.read(project.id)
         guard previousRecord == nil || previousRecord?.phase == .restored,
               previousRecord != nil || !UserDefaults.standard.bool(forKey: airLiftAppliedKey(project.id)),
@@ -210,9 +212,11 @@ final class StorageEngineCoordinator: ObservableObject {
         }
         let targets = (project.rules.map { $0.bundleID + "\0" + $0.relativePath }
             + project.directories.map { $0.bundleID + "\0" + $0.relativePath }).sorted()
-        try store.requireNoUnbackedOverlap(projectID: project.id, targetKeys: targets, includingBackedApplications: true)
+        if !allowOverlappingTargets {
+            try store.requireNoUnbackedOverlap(projectID: project.id, targetKeys: targets, includingBackedApplications: true)
+        }
         let occupied = try DevicePatchService.activeTargetKeys()
-        guard !targets.contains(where: { target in occupied.contains(where: {
+        guard allowOverlappingTargets || !targets.contains(where: { target in occupied.contains(where: {
             target == $0 || target.hasPrefix($0 + "/") || $0.hasPrefix(target + "/")
         }) }) else { throw PatchEngineStateError.recoveryRequired }
 

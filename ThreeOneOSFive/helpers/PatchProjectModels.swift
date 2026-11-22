@@ -230,6 +230,11 @@ extension PatchPackageError: LocalizedError {
     }
 
     var errorDescription: String? {
+        switch self {
+        case .targetOccupied, .targetAppUnavailable, .restoreTargetsChanged:
+            return "Không hoàn tất được thao tác với dữ liệu ứng dụng. Vui lòng thử lại."
+        default: break
+        }
         let message = String(localized: String.LocalizationValue(localizationKey))
         if let localizationArgument {
             return String(format: message, localizationArgument)
@@ -295,7 +300,9 @@ struct PatchOperationError: LocalizedError {
             default: detail = "Không hoàn tất được bước này (mã \(error.code))."
             }
         }
-        return "\(stage.title) [\(stage.rawValue)]: \(detail)"
+        let publicDetail = detail.contains("/") || detail.contains("\\")
+            ? "Không hoàn tất được thao tác. Vui lòng thử lại." : detail
+        return "\(stage.title) [\(stage.rawValue)]: \(publicDetail)"
     }
 }
 

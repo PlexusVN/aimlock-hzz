@@ -54,6 +54,7 @@ func applicationStore() throws -> PatchEngineApplicationStore { Fixture.store }
         source += feature[feature.index('struct PatchRestoreConfirmation:'):feature.index('struct PatchCategory:')]
         source += '''
 @MainActor final class FeaturePatchService {
+let independentCatalogToggles = false
 let defaults=UserDefaults.standard
 var catalogApplications:CatalogPatchApplicationRegistry { CatalogPatchApplicationRegistry(defaults:defaults) }
 var patchProjectsDir:URL { Fixture.root }

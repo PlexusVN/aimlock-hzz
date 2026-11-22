@@ -71,7 +71,7 @@ import Foundation
         for (variant,bundle) in [("ffth","com.dts.freefireth"),("ffmax","com.dts.freefiremax"),
                                  ("capcut","com.lemon.lvoverseas")] {
             try await accept(project([bundle]),variant:variant,"legacy "+variant)
-            try await reject(project(["com.example.other"]),variant:variant,"legacy binding "+variant)
+            try await accept(project(["com.example.other"]),variant:variant,"package binding overrides catalog label "+variant)
         }
         try await accept(project(["com.dts.freefireth"]),"generic known application")
         try await accept(project(["com.example.New-App"]),"generic arbitrary application")
@@ -79,6 +79,10 @@ import Foundation
         try await accept(project(["com.example.one","org.example.two"],declared:[]),"inferred rule identities")
         try await accept(project(["com.example.one"],declared:["com.example.one","org.example.two"]),
                          "declared application without a replacement rule")
+        for variant in ["ffth", "ffmax", "capcut"] {
+            try await accept(project(["com.example.custom", "org.example.second"]), variant: variant,
+                             "package targets preserved independently of catalog label " + variant)
+        }
         try await accept(project((0..<256).map { "com.example.app\($0)" }),"maximum 256 applications")
 
         for variant in ["unknown","native","mod","original",""] {

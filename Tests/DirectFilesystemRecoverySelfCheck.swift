@@ -503,6 +503,40 @@ enum ContainerStore {
             try PatchTransaction.restore(receipt: receipt, containerResolver: { _ in game })
             try check(PatchTransaction.latestRecordedApplicationState(projectID: patch.id, backupRoot: backup) == .off, "directory-only recovery can terminate without inventing files")
         }
+        do {
+            let (game, backup) = try fixture("independent-overwrite")
+            let file = game.appendingPathComponent("Documents/shared")
+            try Data([0]).write(to: file)
+            func project(_ byte: UInt8) -> PatchProject {
+                PatchProject(name: "Independent", rules: [PatchRule(bundleID: "com.fixture.game",
+                    relativePath: "Documents/shared", replacementFilename: "shared", replacementData: Data([byte]))])
+            }
+            var first = project(1)
+            first.rules.append(PatchRule(bundleID: "com.fixture.game", relativePath: "Documents/only-a",
+                replacementFilename: "only-a", replacementData: Data([1])))
+            let a = try PatchTransaction.apply(project: first, backupRoot: backup,
+                allowOverlappingTargets: true, containerResolver: { _ in game })
+            let b = try PatchTransaction.apply(project: project(2), backupRoot: backup,
+                allowOverlappingTargets: true, containerResolver: { _ in game })
+            try check(try Data(contentsOf: file) == Data([2]), "later feature must overwrite the same file")
+            var broken = project(3)
+            broken.rules.append(PatchRule(bundleID: "com.fixture.game", relativePath: "Documents/failing",
+                replacementFilename: "failing", replacementData: Data([3])))
+            try expectFailure("overlap write failure must roll back") {
+                _ = try PatchTransaction.apply(project: broken, backupRoot: backup,
+                    allowOverlappingTargets: true, containerResolver: { _ in game },
+                    beforeWrite: { if $0 == 1 { throw FilesystemCheckError.injected } })
+            }
+            try check(try Data(contentsOf: file) == Data([2]), "failed overwrite must preserve last successful feature")
+            try PatchTransaction.restore(receipt: a, allowChangedTargets: true, preserveLaterPatches: true,
+                containerResolver: { _ in game })
+            try check(try Data(contentsOf: file) == Data([2]), "turning earlier feature OFF must preserve later writer")
+            try check(!fm.fileExists(atPath: game.appendingPathComponent("Documents/only-a").path), "OFF must restore its own non-overlapping targets")
+            try check(try PatchTransaction.recordedApplicationState(receipt: a) == .off, "earlier feature must turn OFF")
+            try PatchTransaction.restore(receipt: b, allowChangedTargets: true, preserveLaterPatches: true,
+                containerResolver: { _ in game })
+            try check(try Data(contentsOf: file) == Data([1]), "OFF restores the latest feature's own pre-activation snapshot")
+        }
         print("Direct filesystem recovery: \(checks) checks passed")
     }
 }

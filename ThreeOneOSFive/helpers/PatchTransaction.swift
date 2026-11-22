@@ -683,6 +683,7 @@ enum PatchTransaction {
         project: PatchProject,
         backupRoot: URL,
         engine: PatchWriteEngine = .legacy3105,
+        allowOverlappingTargets: Bool = false,
         containerResolver: (String) throws -> URL,
         beforeWrite: ((Int) throws -> Void)? = nil,
         beforeDirectoryCreate: ((Int) throws -> Void)? = nil,
@@ -697,7 +698,7 @@ enum PatchTransaction {
         }
         // A damaged journal is unknown state, not evidence that a patch is OFF.
         // Never take a new baseline from possibly patched bytes in that state.
-        try requireReadableTransactionHistory(backupRoot: backupRoot, fileManager: fileManager)
+        if !allowOverlappingTargets { try requireReadableTransactionHistory(backupRoot: backupRoot, fileManager: fileManager) }
         guard latestReceipt(
             projectID: project.id,
             backupRoot: backupRoot,
@@ -706,13 +707,15 @@ enum PatchTransaction {
             throw PatchPackageError.projectAlreadyApplied
         }
         let engineStore = PatchEngineApplicationStore(backupRoot: backupRoot)
-        try engineStore.requireResolvedLegacyHistory()
+        if !allowOverlappingTargets { try engineStore.requireResolvedLegacyHistory() }
         let previousEngine = try engineStore.read(project.id)
         let legacyAirLift = UserDefaults.standard.bool(forKey: "airlift.applied.\(project.id.uuidString)")
         if previousEngine == nil && legacyAirLift { throw PatchEngineStateError.airLiftNoBackup }
         let engineTargets = (project.rules.map { $0.bundleID + "\0" + $0.relativePath }
             + project.directories.map { $0.bundleID + "\0" + $0.relativePath }).sorted()
-        try engineStore.requireNoUnbackedOverlap(projectID: project.id, targetKeys: engineTargets)
+        if !allowOverlappingTargets {
+            try engineStore.requireNoUnbackedOverlap(projectID: project.id, targetKeys: engineTargets)
+        }
         let transactionID = UUID()
         var engineRecord = PatchEngineApplicationRecord(projectID: project.id, operationID: transactionID,
             engine: engine, baseline: .capturedPriorState, targetKeys: engineTargets, journalID: transactionID)
@@ -801,7 +804,7 @@ enum PatchTransaction {
         )
         for resolved in resolvedRules {
             let occupancyKey = resolved.rule.bundleID + "\0" + resolved.rule.relativePath
-            if occupied.contains(occupancyKey) {
+            if !allowOverlappingTargets && occupied.contains(occupancyKey) {
                 throw PatchPackageError.targetOccupied(
                     resolved.rule.bundleID + "/" + resolved.rule.relativePath
                 )
@@ -1020,6 +1023,7 @@ enum PatchTransaction {
         receipt: PatchTransactionReceipt,
         allowChangedTargets: Bool = false,
         expectedCurrentState: Data? = nil,
+        preserveLaterPatches: Bool = false,
         containerResolver: (String) throws -> URL,
         beforeWrite: ((Int) throws -> Void)? = nil,
         beforeRestoreVerification: (() throws -> Void)? = nil,
@@ -1040,13 +1044,27 @@ enum PatchTransaction {
                 journal: journal,
                 containerResolver: containerResolver
             )
-            let resolved = try resolvedRecords(
+            var resolved = try resolvedRecords(
                 journal.records,
                 transactionDirectory: transactionDirectory,
                 roots: roots,
                 allowMissingParents: journal.status == .prepared,
                 fileManager: fileManager
             )
+            if preserveLaterPatches {
+                let directories = try fileManager.contentsOfDirectory(at: backupRoot,
+                    includingPropertiesForKeys: nil, options: [.skipsHiddenFiles])
+                var newer = Set<String>()
+                for directory in directories {
+                    guard let id = UUID(uuidString: directory.lastPathComponent), id != receipt.projectID,
+                          let other = latestReceipt(projectID: id, backupRoot: backupRoot),
+                          let history = try? readJournal(other.journalURL),
+                          history.createdAt > journal.createdAt,
+                          history.status == .applied || history.status == .prepared else { continue }
+                    newer.formUnion(history.records.map { $0.bundleID + "\0" + $0.relativePath })
+                }
+                resolved.removeAll { newer.contains($0.record.bundleID + "\0" + $0.record.relativePath) }
+            }
             let changes = try restoreChanges(in: resolved, prepared: journal.status == .prepared, fileManager: fileManager)
             if let expectedCurrentState,
                try currentStateSnapshot(receipt: receipt, resolved: resolved, fileManager: fileManager) != expectedCurrentState {
@@ -1098,7 +1116,7 @@ enum PatchTransaction {
                 try writeJournal(journal, to: receipt.journalURL)
             }
 
-            removeEmptyCreatedDirectories(createdDirectoryURLs, fileManager: fileManager)
+            if !preserveLaterPatches { removeEmptyCreatedDirectories(createdDirectoryURLs, fileManager: fileManager) }
             var restored = engineRecord ?? PatchEngineApplicationRecord(projectID: receipt.projectID,
                 operationID: receipt.id, engine: .legacy3105, baseline: .capturedPriorState,
                 targetKeys: journal.records.map { $0.bundleID + "\0" + $0.relativePath }
@@ -2082,13 +2100,15 @@ enum DevicePatchService {
         }
     }
 
-    static func apply(project: PatchProject, preparedContainers: [String: URL]? = nil) throws -> PatchTransactionReceipt {
+    static func apply(project: PatchProject, preparedContainers: [String: URL]? = nil,
+                      allowOverlappingTargets: Bool = false) throws -> PatchTransactionReceipt {
         let bundleIDs = orderedBundleIdentifiers(in: project)
         return try withResolvedContainers(bundleIDs: bundleIDs, prepared: preparedContainers) { roots in
             try PatchTransaction.apply(
                 project: project,
                 backupRoot: try PatchProjectLibrary.backupRootURL(),
                 engine: WorseQueryHelper.isAvailable ? .worseQuery : .legacy3105,
+                allowOverlappingTargets: allowOverlappingTargets,
                 containerResolver: { bundleID in
                     guard let root = roots[bundleID] else {
                         throw PatchPackageError.targetAppUnavailable(bundleID)
@@ -2118,7 +2138,8 @@ enum DevicePatchService {
         receipt: PatchTransactionReceipt,
         allowChangedTargets: Bool = false,
         expectedCurrentState: Data? = nil,
-        preparedContainers: [String: URL]? = nil
+        preparedContainers: [String: URL]? = nil,
+        preserveLaterPatches: Bool = false
     ) throws {
         let bundleIDs = try PatchTransaction.requiredBundleIdentifiers(for: receipt)
         try withResolvedContainers(bundleIDs: bundleIDs, prepared: preparedContainers) { roots in
@@ -2126,6 +2147,7 @@ enum DevicePatchService {
                 receipt: receipt,
                 allowChangedTargets: allowChangedTargets,
                 expectedCurrentState: expectedCurrentState,
+                preserveLaterPatches: preserveLaterPatches,
                 containerResolver: { bundleID in
                     guard let root = roots[bundleID] else {
                         throw PatchPackageError.targetAppUnavailable(bundleID)

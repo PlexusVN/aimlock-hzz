@@ -16,6 +16,10 @@ import Foundation
         try require(legacy.rules[0].containerKind==nil && legacy.directories[0].containerKind==nil,
                     "old application package without containerKind stopped decoding")
         try service.validate(legacy,variant:"generic")
+        for variant in ["ffth", "ffmax", "capcut"] {
+            try service.validate(legacy, variant: variant)
+            try require(legacy.rules[0].bundleID == "com.example.app", "catalog label changed package target")
+        }
         var checks=3
         for kind in ["application","appGroup","systemAppGroup","system","native",""] {
             project.rules[0].containerKind=kind;project.directories[0].containerKind=kind

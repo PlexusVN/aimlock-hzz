@@ -1,3 +1,7 @@
+## Build 2.4 (49): Công tắc catalog độc lập và thông báo không lộ đường dẫn
+
+Mỗi lần ON có journal local riêng, ghi đè file hiện tại theo Bundle ID/path trong gói, cho phép các chức năng trùng target. OFF không hỏi xác nhận; bỏ qua target thuộc giao dịch bật sau, còn target do chính lần bật này sở hữu được trả về snapshot trước lần bật. OFF AirLift chỉ đổi trạng thái yêu cầu vì engine không có API đọc backup. Giữ chế độ giao dịch nghiêm ngặt cho workspace cá nhân và bộ regression legacy riêng. UI lỗi/log không đưa đường dẫn ra ngoài. Kiểm thử mới dùng công tắc thực và temporary filesystem trên macOS.
+
 ## Build 2.4 (48): Ảnh riêng cho từng chức năng
 
 Thẻ chức năng chỉ hiển thị image_url riêng từ server; không thay bằng ảnh danh mục hoặc phủ huy hiệu cố định. Đồng bộ tải ảnh chức năng trước danh mục và revalidate bytes kể cả URL không đổi. Ảnh thiếu/lỗi dùng biểu tượng ảnh trống. Thêm kiểm thử hai chức năng cùng danh mục và cập nhật tại cùng URL.

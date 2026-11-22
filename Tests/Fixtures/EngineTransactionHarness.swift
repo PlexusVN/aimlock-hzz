@@ -92,12 +92,12 @@ enum IntegrityCommitBarrier { static func withCommit<T>(_ operation:() throws ->
 enum DevicePatchService {
     static func activeTargetKeys() throws -> Set<String> { [] }
     @MainActor static func prepareContainers(bundleIDs:[String]) async throws -> [String:URL] { [:] }
-    @MainActor static func apply(project:PatchProject,preparedContainers:[String:URL]?) throws { Fixture.directWrites += 1 }
+    @MainActor static func apply(project:PatchProject,preparedContainers:[String:URL]?,allowOverlappingTargets:Bool = false) throws { Fixture.directWrites += 1 }
     @MainActor static func recordedApplicationState(projectID:UUID) -> PatchApplicationState? { Fixture.journal }
     @MainActor static func latestReceipt(projectID:UUID)->PatchTransactionReceipt? { Fixture.receipt }
     @MainActor static func prepareContainers(receipt:PatchTransactionReceipt) async throws -> [String:URL] { [:] }
     @MainActor static func restore(receipt:PatchTransactionReceipt,allowChangedTargets:Bool,
-                                   expectedCurrentState:Data? = nil, preparedContainers:[String:URL]) throws {
+                                   expectedCurrentState:Data? = nil, preparedContainers:[String:URL], preserveLaterPatches:Bool = false) throws {
         Fixture.restores += 1;Fixture.journal = .off
         if var record=try Fixture.store.read(receipt.projectID) { record.phase = .restored; try Fixture.store.save(record) }
     }

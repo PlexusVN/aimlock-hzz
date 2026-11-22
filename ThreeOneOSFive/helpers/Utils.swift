@@ -10,7 +10,9 @@ class AppLog: ObservableObject {
     @Published var entries: [String] = []
     func append(_ msg: String) {
         DispatchQueue.main.async {
-            self.entries.append(String(msg.prefix(8_192)))
+            // Diagnostics are public UI too. Never retain raw native output or
+            // paths captured from stdout/stderr in the user-visible log buffer.
+            self.entries.append("Thao tác hệ thống đã được ghi nhận.")
             if self.entries.count > 500 { self.entries.removeFirst(self.entries.count - 500) }
         }
     }

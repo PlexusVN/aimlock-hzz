@@ -353,6 +353,66 @@ final class FeaturePatchOperationCancellation: @unchecked Sendable {
 
 @MainActor
 final class FeaturePatchService: ObservableObject {
+    let independentCatalogToggles = true
+
+    private func applyIndependentCatalogPatch(_ patch: PatchItem, auth: AuthManager) async throws {
+        guard auth.authState == .verified else { throw FeaturePatchError.notAuthenticated }
+        let revision = auth.authenticationRevision
+        try await withCatalogOperation(identity: "patch:\(patch.downloadIdentity)") {
+          try await withExclusivePatchOperation { operationID in
+            guard auth.authState == .verified, auth.authenticationRevision == revision else {
+                throw FeaturePatchError.notAuthenticated
+            }
+            self.updatePatchOperation(.download)
+            let file = try await self.downloadPatch(patch, auth: auth)
+            defer { try? FileManager.default.removeItem(at: file) }
+            self.updatePatchOperation(.decode)
+            var project = try PatchPackageCodec.decode(Data(contentsOf: file), password: nil).project
+            try self.validateCatalogPackageTargets(project, variant: patch.artifactVariant ?? "")
+            // Package IDs may be reused by uploads. A local activation has its
+            // own journal; Bundle IDs and relative paths stay exactly as supplied.
+            project.id = UUID()
+            project.isPrivate = true
+            let roots: [String: URL]? = StorageEngineCoordinator.shared.isAirLiftActive ? nil
+                : try await DevicePatchService.prepareContainers(bundleIDs: project.allBundleIdentifiers)
+            let generation = try await NetworkAccessGate.shared.requireAllowed()
+            try await AppIntegrityRuntime.shared.requireAllowed(force: true)
+            try Task.checkCancellation()
+            guard auth.authState == .verified, auth.authenticationRevision == revision else {
+                throw FeaturePatchError.notAuthenticated
+            }
+            try self.beginPatchCommit(.write)
+            let identity = self.patchStorageSlug(patch)
+            try self.saveRecoveryMetadata(projectID: project.id, title: patch.name, identity: identity)
+            self.catalogApplications.associate(project.id, with: identity)
+            self.setRequestedEnabled(false, identity: identity)
+            defer { self.applicationRevision &+= 1; self.refreshRecoveryItems() }
+            if StorageEngineCoordinator.shared.isAirLiftActive {
+                try await StorageEngineCoordinator.shared.applyPatchProjectInOperation(project,
+                    operationID: operationID, allowOverlappingTargets: true)
+            } else {
+                let payload = project
+                _ = try await DirectPatchExecutor.run(validation: {
+                    try NetworkAccessGate.shared.validateGeneration(generation)
+                    guard auth.authState == .verified, auth.authenticationRevision == revision else {
+                        throw FeaturePatchError.notAuthenticated
+                    }
+                }) {
+                    try IntegrityCommitBarrier.withCommit {
+                        try DevicePatchService.apply(project: payload, preparedContainers: roots,
+                            allowOverlappingTargets: true)
+                    }
+                }
+            }
+            try NetworkAccessGate.shared.validateGeneration(generation)
+            guard auth.authState == .verified, auth.authenticationRevision == revision else {
+                throw FeaturePatchError.notAuthenticated
+            }
+            self.catalogApplications.markApplied(identity)
+            self.setRequestedEnabled(true, identity: identity)
+          }
+        }
+    }
     @Published var categories: [PatchCategory] = []
     @Published var patchStepMessage: String = ""
     @Published var patches: [PatchItem] = []
@@ -798,6 +858,10 @@ final class FeaturePatchService: ObservableObject {
 
     func applyPatch(_ patch: PatchItem, auth: AuthManager,
                     recoveryConfirmation: PatchRestoreConfirmation? = nil) async throws {
+        if independentCatalogToggles {
+            try await applyIndependentCatalogPatch(patch, auth: auth)
+            return
+        }
         if let recoveryConfirmation, recoveryConfirmation.authRevision != auth.authenticationRevision {
             throw PatchRestoreError.confirmationExpired
         }
@@ -1013,9 +1077,8 @@ final class FeaturePatchService: ObservableObject {
         }
     }
 
-    /// The verified package owns generic application identities. Legacy variants
-    /// retain their exact single-application binding; neither path grants native
-    /// or group-container capabilities from package metadata.
+    /// Package rules own their application targets. Catalog variants describe
+    /// publication metadata and never replace or constrain a package Bundle ID.
     private func validateCatalogPackageTargets(_ project: PatchProject, variant: String) throws {
         guard AppSecurityConfiguration.supportsProtectedArtifact(variant: variant, kind: "package"),
               !project.rules.isEmpty,
@@ -1045,17 +1108,10 @@ final class FeaturePatchService: ObservableObject {
                 throw ProtectedDownloadError.invalidResponse
             }
         }
-        if variant == "generic" {
-            guard bundleIDs.count <= 256, project.bundleIdentifiers.count <= 256,
-                  project.rules.count <= 256, project.directories.count <= 256,
-                  targets.allSatisfy({ $0.2 == nil || $0.2 == "application" }) else {
-                throw ProtectedDownloadError.invalidResponse
-            }
-        } else {
-            guard let expectedBundleID = AppSecurityConfiguration.protectedBundleID(forVariant: variant),
-                  bundleIDs.allSatisfy({ $0 == expectedBundleID }) else {
-                throw ProtectedDownloadError.invalidResponse
-            }
+        guard bundleIDs.count <= 256, project.bundleIdentifiers.count <= 256,
+              project.rules.count <= 256, project.directories.count <= 256,
+              targets.allSatisfy({ $0.2 == nil || $0.2 == "application" }) else {
+            throw ProtectedDownloadError.invalidResponse
         }
     }
 
@@ -1074,6 +1130,11 @@ final class FeaturePatchService: ObservableObject {
     }
 
     func restorePatch(_ patch: PatchItem, auth: AuthManager, confirmation: PatchRestoreConfirmation? = nil) async throws {
+        if independentCatalogToggles && StorageEngineCoordinator.shared.isAirLiftActive {
+            guard auth.authState == .verified, patchOperation == nil else { throw FeaturePatchError.notAuthenticated }
+            setRequestedEnabled(false, identity: patchStorageSlug(patch))
+            return
+        }
         if let confirmation, confirmation.authRevision != auth.authenticationRevision {
             throw PatchRestoreError.confirmationExpired
         }
@@ -1126,6 +1187,11 @@ final class FeaturePatchService: ObservableObject {
     }
 
     private func activeCatalogProjectIDs(for identity: String) throws -> Set<UUID> {
+        if independentCatalogToggles {
+            guard let id = catalogApplications.projectID(for: identity),
+                  StorageEngineCoordinator.shared.projectApplicationState(id)?.requiresRestore == true else { return [] }
+            return [id]
+        }
         let identities = catalogLookupIdentities(for: identity)
         let preferred = Set(identities.compactMap { catalogApplications.projectID(for: $0) })
         var candidates = Set(try readRecoveryMetadata().filter {
@@ -1274,7 +1340,8 @@ final class FeaturePatchService: ObservableObject {
             let roots = try await DevicePatchService.prepareContainers(receipt: receipt)
             try Task.checkCancellation()
             let allowChangedTargets = confirmation.map { !$0.changedPaths.isEmpty } ?? false
-            let expectedCurrentState = confirmation?.currentStateSnapshot
+            let expectedCurrentState = independentCatalogToggles ? nil : confirmation?.currentStateSnapshot
+            let preserveLater = independentCatalogToggles
             try beginPatchCommit(.restore)
             try await DirectPatchExecutor.run(validation: {
                 try NetworkAccessGate.shared.validateGeneration(networkGeneration)
@@ -1283,8 +1350,9 @@ final class FeaturePatchService: ObservableObject {
                 }
             }) {
                 try IntegrityCommitBarrier.withCommit {
-                    try DevicePatchService.restore(receipt: receipt, allowChangedTargets: allowChangedTargets,
-                        expectedCurrentState: expectedCurrentState, preparedContainers: roots)
+                    try DevicePatchService.restore(receipt: receipt, allowChangedTargets: preserveLater || allowChangedTargets,
+                        expectedCurrentState: expectedCurrentState, preparedContainers: roots,
+                        preserveLaterPatches: preserveLater)
                 }
             }
         }

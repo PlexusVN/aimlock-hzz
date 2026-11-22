@@ -125,14 +125,14 @@ enum DirectPatchExecutor {
         if Fixture.failInspect { throw CatalogCheckError.writeFailure }
         return PatchRestoreInspection(changedTargets:Fixture.changed ? [PatchTargetChange(bundleID:"com.dts.freefireth",relativePath:"Documents/file",kind:.modified)]:[],currentStateSnapshot:Fixture.snapshot)
     }
-    static func apply(project:PatchProject,preparedContainers:[String:URL]?)throws {
+    static func apply(project:PatchProject,preparedContainers:[String:URL]?,allowOverlappingTargets:Bool = false)throws {
         Fixture.applies += 1
         if Fixture.failApply { throw CatalogCheckError.writeFailure }
         try Fixture.establish(project.id,state:Fixture.partialApply ? .recoveryRequired:.applied)
         if Fixture.partialApply { throw CatalogCheckError.writeFailure }
     }
     static func restore(receipt:PatchTransactionReceipt,allowChangedTargets:Bool,
-                        expectedCurrentState:Data?,preparedContainers:[String:URL])throws {
+                        expectedCurrentState:Data?,preparedContainers:[String:URL],preserveLaterPatches:Bool = false)throws {
         if Fixture.failRestore { throw CatalogCheckError.writeFailure }
         if let expectedCurrentState,expectedCurrentState != Fixture.snapshot {
             throw PatchPackageError.restoreTargetsChanged(["com.dts.freefireth/Documents/file"])
@@ -148,5 +148,5 @@ enum DirectPatchExecutor {
         do { return PatchEngineApplicationStore.reconcile(record:try Fixture.store.read(id),journal:Fixture.states[id],legacyAirLift:false) }
         catch { return .recoveryRequired }
     }
-    func applyPatchProjectInOperation(_ project:PatchProject,operationID:UUID)async throws { throw CatalogCheckError.writeFailure }
+    func applyPatchProjectInOperation(_ project:PatchProject,operationID:UUID,allowOverlappingTargets:Bool = false)async throws { throw CatalogCheckError.writeFailure }
 }

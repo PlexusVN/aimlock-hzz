@@ -62,6 +62,29 @@ import Foundation
     @MainActor static func main() async throws {
         let auth = AuthManager(), item = PatchItem(id: 1, name: "Fixture", slug: "fixture")
         try Fixture.reset()
+        do {
+            let independent = FeaturePatchService()
+            independent.independentCatalogToggles = true
+            let second = PatchItem(id: 2, name: "Second", slug: "second")
+            let ui = ToggleRecoveryHarness(service: independent, authManager: auth)
+            ui.tap(item); await ui.awaitAction()
+            let a = independent.catalogApplications.projectID(for: "catalog_1_ffth")
+            ui.tap(second); await ui.awaitAction()
+            let b = independent.catalogApplications.projectID(for: "catalog_2_ffth")
+            try check(a != nil && b != nil && a != b, "reused package ID must not link two catalog switches")
+            try check(independent.isPatchEnabled(item) && independent.isPatchEnabled(second), "two overlapping features must both enable")
+            try check(ui.review == nil && Fixture.applies == 2 && Fixture.restores == 0, "ON must overwrite without recovery or review")
+            Fixture.changed = true
+            ui.tap(item); await ui.awaitAction()
+            try check(ui.review == nil && !independent.isPatchEnabled(item) && independent.isPatchEnabled(second), "OFF must not prompt or disable a different feature")
+            ui.tap(item); await ui.awaitAction()
+            try check(ui.review == nil && independent.isPatchEnabled(item) && independent.isPatchEnabled(second), "independent ON retry must not demand old recovery")
+            ui.showFixtureFailure(NSError(domain: "fixture", code: 1,
+                userInfo: [NSLocalizedDescriptionKey: "com.example.game/Documents/private-file"]))
+            try check(ui.toast?.message.contains("/") == false && ui.toast?.message.contains("com.example") == false,
+                      "public error revealed target path or Bundle ID")
+        }
+        try Fixture.reset()
         defer { try? FileManager.default.removeItem(at: Fixture.root) }
         let service = FeaturePatchService()
         try await service.applyPatch(item, auth: auth)

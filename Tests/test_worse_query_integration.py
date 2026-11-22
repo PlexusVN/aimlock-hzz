@@ -35,7 +35,8 @@ class IntegrationContracts(unittest.TestCase):
         self.assertLess(body.index('acquireAccess(for: path)'), body.index('try operation(roots)'))
         coordinator = (HELPERS / 'StorageEngineCoordinator.swift').read_text(encoding='utf-8')
         direct = coordinator.split('func applyPatchProject(')[1].split('guard isAirLiftActive')[0]
-        self.assertIn('DevicePatchService.apply(project: project, preparedContainers: roots)', direct)
+        self.assertIn('DevicePatchService.apply(project: project, preparedContainers: roots,', direct)
+        self.assertIn('allowOverlappingTargets: allowOverlappingTargets', direct)
         self.assertNotIn('UserDefaults.standard.set(true', direct)
 
     def test_native_query_constants_and_symlink_lifecycle(self):

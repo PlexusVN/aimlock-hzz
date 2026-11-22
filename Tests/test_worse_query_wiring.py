@@ -72,7 +72,7 @@ class WorseQueryWiringTests(unittest.TestCase):
         patch_path = ROOT / 'ThreeOneOSFive' / 'helpers' / 'FeaturePatchService.swift'
         content = patch_path.read_text(encoding='utf-8')
         self.assertIn('PatchEngineApplicationStore.requireDirectRestore', content)
-        self.assertIn('DevicePatchService.restore(receipt: receipt, allowChangedTargets: allowChangedTargets', content)
+        self.assertIn('DevicePatchService.restore(receipt: receipt, allowChangedTargets: preserveLater || allowChangedTargets', content)
         self.assertIn('expectedCurrentState: expectedCurrentState, preparedContainers: roots', content)
         self.assertIn('let allowChangedTargets = confirmation.map { !$0.changedPaths.isEmpty } ?? false', content)
 
