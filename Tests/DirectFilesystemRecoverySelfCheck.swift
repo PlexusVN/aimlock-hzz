@@ -588,6 +588,28 @@ enum ContainerStore {
                 containerResolver: { _ in game })
             try check(!fm.fileExists(atPath: file.path), "all independent writers OFF must remove a file absent before the chain")
         }
+        do {
+            let (oldGame, backup) = try fixture("history-container-binding")
+            let newGame = oldGame.deletingLastPathComponent().appendingPathComponent("replacement-container")
+            try fm.createDirectory(at: newGame.appendingPathComponent("Documents"), withIntermediateDirectories: true)
+            let payload = Data([7])
+            let first = PatchProject(name: "Old container", rules: [PatchRule(bundleID: "com.fixture.game",
+                relativePath: "Documents/shared", replacementFilename: "shared", replacementData: payload)])
+            let old = try PatchTransaction.apply(project: first, backupRoot: backup,
+                allowOverlappingTargets: true, containerResolver: { _ in oldGame })
+            try PatchTransaction.restore(receipt: old, allowChangedTargets: true, preserveLaterPatches: true,
+                containerResolver: { _ in oldGame })
+            let target = newGame.appendingPathComponent("Documents/shared")
+            try payload.write(to: target)
+            let next = PatchProject(name: "New container", rules: [PatchRule(bundleID: "com.fixture.game",
+                relativePath: "Documents/shared", replacementFilename: "shared", replacementData: Data([8]))])
+            let current = try PatchTransaction.apply(project: next, backupRoot: backup,
+                allowOverlappingTargets: true, containerResolver: { _ in newGame })
+            try PatchTransaction.restore(receipt: current, allowChangedTargets: true, preserveLaterPatches: true,
+                containerResolver: { _ in newGame })
+            try check(try Data(contentsOf: target) == payload,
+                "equal historical bytes in another container must not authorize deleting the current original")
+        }
         print("Direct filesystem recovery: \(checks) checks passed")
     }
 }

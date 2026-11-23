@@ -1,3 +1,7 @@
+## Build 2.4 (53): Đối chiếu Astra và ràng buộc lịch sử restore
+
+Đối chiếu lõi patch, executor, định danh, TLS, crypto và session với source Astra người dùng chỉ định. Giữ các cải tiến Aimlock và contract generic hiện tại. Truy baseline chỉ nhận record cùng container fingerprint, bỏ giao dịch rolledBack và ngắt lineage khi có payload xen giữa không khớp. Thêm regression container cũ/mới cùng bytes. Xem docs/ASTRA_SYNC_20261124.md.
+
 ## Build 2.4 (52): Xóa đúng file do chuỗi patch tạo mới
 
 - Restore trực tiếp giờ lần theo chuỗi nguồn gốc của từng file khi nhiều chức năng ghi cùng đường dẫn.

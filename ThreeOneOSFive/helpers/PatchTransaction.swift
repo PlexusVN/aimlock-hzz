@@ -1528,8 +1528,14 @@ enum PatchTransaction {
             var chainedDigest = initialDigest
             for prior in history {
                 guard let record = prior.journal.records.first(where: {
-                    $0.bundleID + "\0" + $0.relativePath == key && $0.replacementDigest == chainedDigest
+                    $0.bundleID + "\0" + $0.relativePath == key
+                        && $0.containerFingerprint == item.record.containerFingerprint
                 }) else { continue }
+                // Rolled-back writes never supplied the captured baseline.
+                // A different intervening payload breaks lineage, even if an
+                // older unrelated transaction happens to contain equal bytes.
+                if prior.journal.status == .rolledBack { continue }
+                guard record.replacementDigest == chainedDigest else { break }
 
                 // An active earlier writer still owns these bytes, so the
                 // immediate baseline is the correct result for this target.
