@@ -1502,14 +1502,23 @@ enum PatchTransaction {
         var history: [HistoricalJournal] = []
         for directory in projectDirectories {
             guard let projectID = UUID(uuidString: directory.lastPathComponent),
-                  projectID != currentJournal.projectID,
-                  let receipt = latestReceipt(projectID: projectID, backupRoot: backupRoot, fileManager: fileManager),
-                  let prior = try? readJournal(receipt.journalURL),
-                  prior.createdAt < currentJournal.createdAt else { continue }
-            history.append(HistoricalJournal(
-                journal: prior,
-                transactionDirectory: receipt.journalURL.deletingLastPathComponent()
-            ))
+                  let transactions = try? fileManager.contentsOfDirectory(
+                    at: directory, includingPropertiesForKeys: nil, options: [.skipsHiddenFiles]
+                  ) else { continue }
+            for transaction in transactions {
+                let journalURL = transaction.appendingPathComponent(journalFilename)
+                guard fileManager.fileExists(atPath: journalURL.path),
+                      let prior = try? readJournal(journalURL),
+                      (minimumSchemaVersion...schemaVersion).contains(prior.schemaVersion),
+                      prior.projectID == projectID,
+                      transaction.lastPathComponent == prior.transactionID.uuidString,
+                      prior.transactionID != currentJournal.transactionID,
+                      prior.createdAt < currentJournal.createdAt else { continue }
+                history.append(HistoricalJournal(
+                    journal: prior,
+                    transactionDirectory: transaction
+                ))
+            }
         }
         history.sort { $0.journal.createdAt > $1.journal.createdAt }
 
