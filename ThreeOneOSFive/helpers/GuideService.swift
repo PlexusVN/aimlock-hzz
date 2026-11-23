@@ -3,7 +3,7 @@ import SwiftUI
 
 // MARK: - Guide Models
 
-struct GuideItem: Identifiable, Codable, Equatable {
+struct GuideItem: Identifiable, Codable, Equatable, Sendable {
     let id: Int
     let title: String
     let content: String
@@ -55,7 +55,7 @@ struct GuideItem: Identifiable, Codable, Equatable {
     }
 }
 
-private struct GuidesResponse: Codable {
+private struct GuidesResponse: Codable, Sendable {
     let success: Bool
     let data: [GuideItem]
 }
@@ -117,7 +117,10 @@ final class GuideService: ObservableObject {
             guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
                 return
             }
-            let decoded = try JSONDecoder().decode(GuidesResponse.self, from: data)
+            let decoded = try await Task.detached(priority: .utility) {
+                try JSONDecoder().decode(GuidesResponse.self, from: data)
+            }.value
+            guard !Task.isCancelled else { return }
             if decoded.success {
                 self.guides = decoded.data
             }

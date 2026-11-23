@@ -14,7 +14,7 @@ class FeatureImageChecks(unittest.TestCase):
     def test_cards_use_feature_images_and_sync_refreshes_them(self):
         ui = (ROOT / 'ThreeOneOSFive/views/FeaturesView.swift').read_text(encoding='utf-8')
         card = extract_function(ui, 'private var patchImage:')
-        self.assertIn('service.cachedImage(for: patch)', card)
+        self.assertIn('service.displayPatchImage(for: patch)', card)
         self.assertNotIn('categoryImage(', card)
         self.assertNotIn('AimlockReticleIcon()', card)
         source = (ROOT / 'ThreeOneOSFive/helpers/FeaturePatchService.swift').read_text(encoding='utf-8')
@@ -45,6 +45,7 @@ class FeatureImageChecks(unittest.TestCase):
             'private func localCategoryImageURL(', 'func categoryImage(',
             'func downloadCategoryImageIfNeeded(', 'func downloadPatchImageIfNeeded(',
             'func cachedImage(',
+            'func displayPatchImage(', 'func displayCategoryImage(', 'private func commitImageFile(',
         ])
         fixture = (ROOT / 'Tests/FeatureImagesSelfCheck.swift').read_text(encoding='utf-8')
         with tempfile.TemporaryDirectory() as directory:

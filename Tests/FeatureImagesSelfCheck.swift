@@ -1,4 +1,9 @@
 import Foundation
+#if canImport(Darwin)
+import Darwin
+#else
+import Glibc
+#endif
 #if canImport(FoundationNetworking)
 import FoundationNetworking
 #endif
@@ -17,6 +22,10 @@ struct UIImage: Equatable {
     }
 }
 struct PatchItem { let id: Int; let categoryId: Int; let imageUrl: String }
+enum FeatureThumbnailDecoder {
+    static func decode(_ data:Data)->UIImage? { UIImage(data:data) }
+    static func read(_ url:URL)->UIImage? { UIImage(contentsOfFile:url.path) }
+}
 struct PatchCategory { let id: Int; let imageUrl: String; var name: String { "Fixture" } }
 
 @MainActor final class ImageTransport {
@@ -44,6 +53,8 @@ struct PatchCategory { let id: Int; let imageUrl: String; var name: String { "Fi
     var categories: [PatchCategory] = []
     var patchImageCache: [Int: UIImage] = [:]
     var categoryImageCache: [Int: UIImage] = [:]
+    var patchImageSources: [Int:String] = [:]
+    var categoryImageSources: [Int:String] = [:]
     let root: URL
     let suite = "image-tests-" + UUID().uuidString
     init() throws {

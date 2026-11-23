@@ -2,10 +2,28 @@ import Foundation
 import UIKit
 import CryptoKit
 import Combine
+import ImageIO
+import Darwin
+
+// BEGIN FEATURE THUMBNAIL DECODER
+enum FeatureThumbnailDecoder {
+    static func decode(_ data: Data) -> UIImage? {
+        guard let source = CGImageSourceCreateWithData(data as CFData, [kCGImageSourceShouldCache: false] as CFDictionary),
+              let image = CGImageSourceCreateThumbnailAtIndex(source, 0, [
+                kCGImageSourceCreateThumbnailFromImageAlways: true,
+                kCGImageSourceCreateThumbnailWithTransform: true,
+                kCGImageSourceThumbnailMaxPixelSize: 256,
+                kCGImageSourceShouldCacheImmediately: true
+              ] as CFDictionary) else { return nil }
+        return UIImage(cgImage: image)
+    }
+    static func read(_ url: URL) -> UIImage? { (try? Data(contentsOf: url)).flatMap(decode) }
+}
+// END FEATURE THUMBNAIL DECODER
 
 // MARK: - Feature Patch Models
 
-struct PatchRecoveryItem: Identifiable, Equatable {
+struct PatchRecoveryItem: Identifiable, Equatable, Sendable {
     let projectID: UUID
     var id: UUID { projectID }
     let title: String
@@ -25,7 +43,7 @@ struct PatchRestoreConfirmation: Identifiable {
 
 /// Display-only metadata. Journal/provenance, never this file, owns recovery
 /// state. Do not store payloads, passwords, URLs or authentication material.
-private struct CatalogRecoveryMetadata: Codable {
+private struct CatalogRecoveryMetadata: Codable, Sendable {
     let projectID: UUID
     let title: String
     let catalogIdentity: String
@@ -33,7 +51,7 @@ private struct CatalogRecoveryMetadata: Codable {
     var requestedBinding: String? = nil
 }
 
-struct PatchCategory: Identifiable, Codable, Equatable {
+struct PatchCategory: Identifiable, Codable, Equatable, Sendable {
     let id: Int
     let name: String
     let icon: String
@@ -56,7 +74,7 @@ struct PatchCategory: Identifiable, Codable, Equatable {
     }
 }
 
-struct PatchItem: Identifiable, Codable, Equatable {
+struct PatchItem: Identifiable, Codable, Equatable, Sendable {
     let id: Int
     let categoryId: Int
     let name: String
@@ -123,7 +141,7 @@ struct PatchItem: Identifiable, Codable, Equatable {
     }
 }
 
-struct PatchSyncResponse: Codable {
+struct PatchSyncResponse: Codable, Sendable {
     let success: Bool
     let hmac: String?
     let categories: [PatchCategory]
@@ -353,6 +371,144 @@ final class FeaturePatchOperationCancellation: @unchecked Sendable {
 }
 // END CATALOG OPERATION PROGRESS
 
+// BEGIN CATALOG PRESENTATION SNAPSHOT
+struct CatalogFeaturePresentation: Equatable, Sendable {
+    var state: PatchApplicationState = .off
+    var enabled = false
+}
+struct CatalogPresentationTarget: Sendable {
+    let key: String
+    let identity: String
+    let legacyIdentity: String
+}
+struct CatalogPresentationOverrides: Sendable {
+    var projectValues: [UUID: Bool] = [:]
+    var projectBindings: [UUID: String] = [:]
+    var catalogValues: [String: Bool] = [:]
+    var catalogBindings: [String: String] = [:]
+}
+struct CatalogPresentationSnapshot: Sendable {
+    var cards: [String: CatalogFeaturePresentation]
+    var inventory: [PatchRecoveryItem]
+    var inventoryError: String?
+}
+/// Display data only. Operations still read and validate their actual journal,
+/// authentication and target access. Rendering never invokes this reader.
+enum CatalogPresentationReader {
+    static func load(root: URL, defaults: UserDefaults, targets: [CatalogPresentationTarget],
+                     overrides: CatalogPresentationOverrides,
+                     onCards: @Sendable ([String: CatalogFeaturePresentation]) -> Void = { _ in }) throws -> CatalogPresentationSnapshot {
+        let rootValues = try root.resourceValues(forKeys: [.isDirectoryKey, .isSymbolicLinkKey])
+        guard rootValues.isDirectory == true, rootValues.isSymbolicLink != true else {
+            throw PatchEngineStateError.invalidRecord
+        }
+        let preferences = defaults.dictionaryRepresentation()
+        var rows: [CatalogRecoveryMetadata] = []
+        var inventoryError: String?
+        do {
+            let url = root.appendingPathComponent(".catalog-recovery.plist")
+            if FileManager.default.fileExists(atPath: url.path) {
+                let attributes = try FileManager.default.attributesOfItem(atPath: url.path)
+                guard attributes[.type] as? FileAttributeType == .typeRegular,
+                      ((attributes[.size] as? NSNumber)?.intValue ?? Int.max) <= 2 * 1024 * 1024 else {
+                    throw PatchEngineStateError.invalidRecord
+                }
+                rows = try PropertyListDecoder().decode([CatalogRecoveryMetadata].self, from: Data(contentsOf: url))
+                guard rows.count <= 10_000, Set(rows.map(\.projectID)).count == rows.count else {
+                    throw PatchEngineStateError.invalidRecord
+                }
+            }
+        } catch {
+            rows = []
+            inventoryError = "Không đọc được tên bản khôi phục. Lịch sử và bản sao lưu vẫn được giữ nguyên."
+        }
+        var ids = Set(rows.map(\.projectID))
+        for directory in [root, root.appendingPathComponent(".engine-applications", isDirectory: true)] {
+            try Task.checkCancellation()
+            guard FileManager.default.fileExists(atPath: directory.path) else { continue }
+            let values = try directory.resourceValues(forKeys: [.isDirectoryKey, .isSymbolicLinkKey])
+            guard values.isDirectory == true, values.isSymbolicLink != true else { throw PatchEngineStateError.invalidRecord }
+            for url in try FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil) {
+                if let id = UUID(uuidString: url.deletingPathExtension().lastPathComponent) { ids.insert(id) }
+            }
+        }
+        for (key, value) in preferences where key.hasPrefix("patch_applied_") && key.hasSuffix("_projectID") {
+            if let text = value as? String, let id = UUID(uuidString: text) { ids.insert(id) }
+        }
+        let store = PatchEngineApplicationStore(backupRoot: root)
+        var states: [UUID: PatchApplicationState] = [:], bindings: [UUID: String] = [:]
+        func readProject(_ id: UUID) throws {
+            try Task.checkCancellation()
+            do {
+                let record = try store.read(id)
+                let journal = PatchTransaction.latestRecordedApplicationState(projectID: id, backupRoot: root)
+                states[id] = PatchEngineApplicationStore.reconcile(record: record, journal: journal,
+                    legacyAirLift: preferences["airlift.applied." + id.uuidString] as? Bool ?? false)
+                let journalID = PatchTransaction.latestReceipt(projectID: id, backupRoot: root)?.id ?? record?.journalID
+                bindings[id] = id.uuidString + (journalID.map { ":journal:" + $0.uuidString }
+                    ?? ":operation:" + (record?.operationID.uuidString ?? "unknown-operation"))
+            } catch { states[id] = .recoveryRequired }
+        }
+        func projectID(_ target: CatalogPresentationTarget) -> UUID? {
+            [target.identity, target.legacyIdentity].compactMap {
+                (preferences["patch_applied_" + $0 + "_projectID"] as? String).flatMap(UUID.init(uuidString:))
+            }.first
+        }
+        let priorityIDs = Set(targets.compactMap(projectID))
+        for id in priorityIDs { try readProject(id) }
+        let metadata = Dictionary(uniqueKeysWithValues: rows.map { ($0.projectID, $0) })
+        func requested(_ id: UUID, identity: String?, row: CatalogRecoveryMetadata?) -> Bool? {
+            let binding = bindings[id] ?? id.uuidString + ":operation:unknown-operation"
+            let legacyBinding = row?.requestedBinding ?? binding
+            var candidates: [(Bool?, String?)] = [
+                (overrides.projectValues[id], overrides.projectBindings[id]),
+                (preferences["patch_requested_project_" + id.uuidString] as? Bool,
+                 preferences["patch_requested_project_binding_" + id.uuidString] as? String)
+            ]
+            if let identity {
+                candidates.append((overrides.catalogValues[identity], overrides.catalogBindings[identity]))
+                candidates.append((preferences["patch_requested_enabled_" + identity] as? Bool,
+                    preferences["patch_requested_binding_" + identity] as? String))
+            }
+            candidates.append((row?.requestedEnabled, row?.requestedBinding))
+            for (value, expected) in candidates where (expected ?? legacyBinding) == binding {
+                if let value { return value }
+            }
+            if let identity, !binding.hasSuffix(":unknown-operation"),
+               preferences["patch_applied_" + identity + "_disabledBinding"] as? String == binding { return false }
+            return nil
+        }
+        var cards: [String: CatalogFeaturePresentation] = [:]
+        for target in targets {
+            let identities = [target.identity, target.legacyIdentity]
+            let chosen = identities.first {
+                (preferences["patch_applied_" + $0 + "_projectID"] as? String).flatMap(UUID.init(uuidString:)) != nil
+            } ?? target.identity
+            let id = (preferences["patch_applied_" + chosen + "_projectID"] as? String).flatMap(UUID.init(uuidString:))
+            var state = id.flatMap { states[$0] }
+            if state == nil {
+                state = (preferences["patch_applied_" + chosen] as? Bool == true
+                    || preferences["patch_applied_" + chosen + "_recovery"] as? Bool == true) ? .recoveryRequired : .off
+            }
+            let row = id.flatMap { metadata[$0] }.flatMap { identities.contains($0.catalogIdentity) ? $0 : nil }
+            let enabled = state == .applied && id.map { requested($0, identity: row?.catalogIdentity ?? chosen, row: row) ?? true } == true
+            cards[target.key] = CatalogFeaturePresentation(state: state ?? .off, enabled: enabled)
+        }
+        // Show current switches before scanning old/unassociated history.
+        onCards(cards)
+        for id in ids.subtracting(priorityIDs) { try readProject(id) }
+        let inventory = ids.compactMap { id -> PatchRecoveryItem? in
+            guard let state = states[id], state.requiresRestore else { return nil }
+            let row = metadata[id]
+            let title = row.flatMap { $0.title.isEmpty ? nil : $0.title } ?? "Bản khôi phục \(id.uuidString.prefix(8))"
+            return PatchRecoveryItem(projectID: id, title: title, state: state,
+                requestedEnabled: state == .applied && (requested(id, identity: row?.catalogIdentity, row: row) ?? (row != nil)))
+        }.sorted { $0.projectID.uuidString < $1.projectID.uuidString }
+        return CatalogPresentationSnapshot(cards: cards, inventory: inventory, inventoryError: inventoryError)
+    }
+}
+// END CATALOG PRESENTATION SNAPSHOT
+
 @MainActor
 final class FeaturePatchService: ObservableObject {
     let independentCatalogToggles = true
@@ -567,6 +723,10 @@ final class FeaturePatchService: ObservableObject {
     @Published private(set) var recoveryItems: [PatchRecoveryItem] = []
     @Published private(set) var recoveryInventoryError: String?
     @Published private(set) var patchOperationInProgress = false
+    @Published private(set) var cardPresentations: [String: CatalogFeaturePresentation] = [:]
+    @Published private(set) var presentationReady = false
+    private var presentationGeneration: UInt64 = 0
+    private var presentationRefreshTask: Task<Void, Never>?
     private var pendingPatchOperations = 0
     private var requestedStateOverrides: [String: Bool] = [:]
     private var requestedProjectOverrides: [UUID: Bool] = [:]
@@ -586,6 +746,9 @@ final class FeaturePatchService: ObservableObject {
     @Published private(set) var categoryImageCache: [Int: UIImage] = [:]
     @Published private(set) var patchImageCache: [Int: UIImage] = [:]
     private var catalogImageTask: Task<Void, Never>?
+    private var imageWarmTask: Task<Void, Never>?
+    private var patchImageSources: [Int: String] = [:]
+    private var categoryImageSources: [Int: String] = [:]
 
     private let patchImagesDir: URL = {
         let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
@@ -724,7 +887,11 @@ final class FeaturePatchService: ObservableObject {
                   catalogSyncRevision == syncRevision else {
                 throw FeaturePatchError.notAuthenticated
             }
-            let response = try JSONDecoder().decode(PatchSyncResponse.self, from: data)
+            let response = try await Task.detached(priority: .userInitiated) {
+                try JSONDecoder().decode(PatchSyncResponse.self, from: data)
+            }.value
+            guard !Task.isCancelled, auth.authState == .verified, auth.authenticationRevision == authRevision,
+                  catalogSyncRevision == syncRevision else { throw CancellationError() }
             guard response.success else {
                 print("[FeaturePatch] sync: server returned success=false")
                 return
@@ -738,9 +905,19 @@ final class FeaturePatchService: ObservableObject {
             for previous in patches { _ = patchStorageSlug(previous) }
             categories = response.categories
             patches = response.patches
+            let patchIDs = Set(response.patches.map(\.id)), categoryIDs = Set(response.categories.map(\.id))
+            if patchImageCache.keys.contains(where: { !patchIDs.contains($0) }) {
+                patchImageCache = patchImageCache.filter { patchIDs.contains($0.key) }
+            }
+            if categoryImageCache.keys.contains(where: { !categoryIDs.contains($0) }) {
+                categoryImageCache = categoryImageCache.filter { categoryIDs.contains($0.key) }
+            }
+            patchImageSources = patchImageSources.filter { patchIDs.contains($0.key) }
+            categoryImageSources = categoryImageSources.filter { categoryIDs.contains($0.key) }
             verifiedCatalogVariantsByPatchID = Dictionary(grouping: response.patches, by: \.id)
                 .mapValues { Set($0.compactMap(\.artifactVariant)) }
             verifiedCatalogAuthRevision = authRevision
+            refreshRecoveryItems()
             preloadCategoryImages()
             for patch in patches { _ = cachedImage(for: patch) }
             print("[FeaturePatch] sync OK: \(categories.count) categories, \(patches.count) patches")
@@ -1384,6 +1561,7 @@ final class FeaturePatchService: ObservableObject {
     }
 
     private func beginPatchOperation() {
+        if independentCatalogToggles { suspendPresentationRefresh() }
         pendingPatchOperations += 1
         patchOperationInProgress = true
     }
@@ -1423,6 +1601,7 @@ final class FeaturePatchService: ObservableObject {
     }
 
     private func setRequestedEnabled(_ enabled: Bool, identity: String) {
+        if independentCatalogToggles { updateDisplayedIntent(enabled, identity: identity) }
         let projectID = requestedCatalogProjectID(identity)
         let binding = requestedBinding(projectID: projectID)
         requestedStateOverrides[identity] = enabled
@@ -1438,8 +1617,10 @@ final class FeaturePatchService: ObservableObject {
         do {
             var rows = try readRecoveryMetadata()
             let identities = catalogLookupIdentities(for: identity)
-            for index in rows.indices where rows[index].catalogIdentity == identity ||
-                (projectID != nil && rows[index].projectID == projectID && identities.contains(rows[index].catalogIdentity)) {
+            for index in rows.indices where
+                (!independentCatalogToggles || rows[index].projectID == projectID) &&
+                (rows[index].catalogIdentity == identity ||
+                 (projectID != nil && rows[index].projectID == projectID && identities.contains(rows[index].catalogIdentity))) {
                 // A catalog identity can retain old terminal transactions. Each
                 // row is bound to its own journal, never to another row's receipt.
                 let rowID = rows[index].projectID
@@ -1651,6 +1832,10 @@ final class FeaturePatchService: ObservableObject {
     }
 
     func refreshRecoveryItems() {
+        if independentCatalogToggles {
+            requestPresentationRefresh()
+            return
+        }
         do {
             let root = try PatchProjectLibrary.backupRootURL()
             let rootValues = try root.resourceValues(forKeys: [.isDirectoryKey, .isSymbolicLinkKey])
@@ -1691,6 +1876,79 @@ final class FeaturePatchService: ObservableObject {
             // or unreadable. Do not turn uncertainty into an empty/OFF state.
             recoveryInventoryError = "Chưa đọc được danh sách khôi phục. Giữ nguyên dữ liệu và thử lại khi thiết bị đã mở khóa."
         }
+    }
+
+    func presentation(for patch: PatchItem) -> CatalogFeaturePresentation {
+        cardPresentations[patch.downloadIdentity] ?? CatalogFeaturePresentation()
+    }
+
+    private func updateDisplayedIntent(_ enabled: Bool, identity: String) {
+        var updated = cardPresentations
+        for patch in patches where safeSlug("catalog_\(patch.id)_" + (patch.artifactVariant ?? "legacy")) == identity {
+            var value = updated[patch.downloadIdentity] ?? CatalogFeaturePresentation()
+            value.enabled = enabled
+            if enabled { value.state = .applied } // Called only after a verified commit.
+            updated[patch.downloadIdentity] = value
+        }
+        if updated != cardPresentations { cardPresentations = updated }
+    }
+
+    private func requestPresentationRefresh() {
+        presentationGeneration &+= 1
+        presentationRefreshTask?.cancel()
+        guard !patchOperationInProgress else { presentationReady = false; return }
+        let generation = presentationGeneration
+        let targets = patches.map { patch in
+            CatalogPresentationTarget(key: patch.downloadIdentity,
+                identity: safeSlug("catalog_\(patch.id)_" + (patch.artifactVariant ?? "legacy")),
+                legacyIdentity: safeSlug(patch.slug + "_" + (patch.artifactVariant ?? "legacy")))
+        }
+        let overrides = CatalogPresentationOverrides(projectValues: requestedProjectOverrides,
+            projectBindings: requestedProjectBindings, catalogValues: requestedStateOverrides,
+            catalogBindings: requestedStateBindings)
+        if targets.contains(where: { cardPresentations[$0.key] == nil }) { presentationReady = false }
+        let preferences = defaults
+        presentationRefreshTask = Task { @MainActor [weak self] in
+            do {
+                // Coalesce appearance, catalog and operation notifications into one scan.
+                try await Task.sleep(nanoseconds: 60_000_000)
+                try Task.checkCancellation()
+                guard self?.presentationGeneration == generation, self?.patchOperationInProgress == false else { return }
+                let publishCards: @Sendable ([String: CatalogFeaturePresentation]) -> Void = { [weak self] cards in
+                    Task { @MainActor in
+                        guard let self, self.presentationGeneration == generation, !self.patchOperationInProgress else { return }
+                        if self.cardPresentations != cards { self.cardPresentations = cards }
+                        self.presentationReady = true
+                    }
+                }
+                let work = Task.detached(priority: .utility) {
+                    try CatalogPresentationReader.load(root: PatchProjectLibrary.backupRootURL(), defaults: preferences,
+                        targets: targets, overrides: overrides, onCards: publishCards)
+                }
+                let snapshot = try await withTaskCancellationHandler(operation: { try await work.value }, onCancel: { work.cancel() })
+                try Task.checkCancellation()
+                guard let self, self.presentationGeneration == generation, !self.patchOperationInProgress else { return }
+                if self.cardPresentations != snapshot.cards { self.cardPresentations = snapshot.cards }
+                if self.recoveryItems != snapshot.inventory { self.recoveryItems = snapshot.inventory }
+                self.recoveryInventoryError = snapshot.inventoryError
+                self.presentationReady = true
+            } catch {
+                guard !Task.isCancelled, let self, self.presentationGeneration == generation else { return }
+                if !self.presentationReady {
+                    self.cardPresentations = Dictionary(uniqueKeysWithValues: targets.map {
+                        ($0.key, CatalogFeaturePresentation(state: .recoveryRequired, enabled: false))
+                    })
+                }
+                self.presentationReady = true
+                self.recoveryInventoryError = "Chưa đọc được trạng thái. Hãy thử tải lại khi thiết bị đã mở khóa."
+            }
+        }
+    }
+
+    private func suspendPresentationRefresh() {
+        presentationGeneration &+= 1
+        presentationRefreshTask?.cancel()
+        presentationReady = false
     }
 
     private func clearRestoredAssociations(_ projectID: UUID) {
@@ -1796,8 +2054,48 @@ final class FeaturePatchService: ObservableObject {
     }
 
     func preloadCategoryImages() {
-        for cat in categories {
-            _ = categoryImage(for: cat.id)
+        imageWarmTask?.cancel()
+        let categories = self.categories, patches = self.patches
+        imageWarmTask = Task { @MainActor [weak self] in
+            for category in categories {
+                guard let self, !Task.isCancelled else { return }
+                guard !category.imageUrl.isEmpty, self.categoryImageSources[category.id] != category.imageUrl,
+                      self.defaults.string(forKey: "cat_img_url_\(category.id)") == category.imageUrl else { continue }
+                let local = self.localCategoryImageURL(for: category.id)
+                let image = await Task.detached(priority: .utility) { FeatureThumbnailDecoder.read(local) }.value
+                guard !Task.isCancelled, self.categories.contains(where: { $0.id == category.id && $0.imageUrl == category.imageUrl }),
+                      self.categoryImageSources[category.id] != category.imageUrl, let image else { continue }
+                self.categoryImageSources[category.id] = category.imageUrl
+                self.categoryImageCache[category.id] = image
+            }
+            for patch in patches {
+                guard let self, !Task.isCancelled else { return }
+                guard !patch.imageUrl.isEmpty, self.patchImageSources[patch.id] != patch.imageUrl,
+                      self.defaults.string(forKey: "patch_img_url_\(patch.id)") == patch.imageUrl else { continue }
+                let local = self.localImageURL(patch)
+                let image = await Task.detached(priority: .utility) { FeatureThumbnailDecoder.read(local) }.value
+                guard !Task.isCancelled, self.patches.contains(where: { $0.id == patch.id && $0.imageUrl == patch.imageUrl }),
+                      self.patchImageSources[patch.id] != patch.imageUrl, let image else { continue }
+                self.patchImageSources[patch.id] = patch.imageUrl
+                self.patchImageCache[patch.id] = image
+            }
+        }
+    }
+
+    func displayCategoryImage(for categoryID: Int) -> UIImage? {
+        guard let category = categories.first(where: { $0.id == categoryID }), !category.imageUrl.isEmpty,
+              categoryImageSources[categoryID] == category.imageUrl else { return nil }
+        return categoryImageCache[categoryID]
+    }
+
+    func displayPatchImage(for patch: PatchItem) -> UIImage? {
+        guard !patch.imageUrl.isEmpty, patchImageSources[patch.id] == patch.imageUrl else { return nil }
+        return patchImageCache[patch.id]
+    }
+
+    private func commitImageFile(_ staging: URL, to destination: URL) throws {
+        guard rename(staging.path, destination.path) == 0 else {
+            throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno))
         }
     }
 
@@ -1811,7 +2109,9 @@ final class FeaturePatchService: ObservableObject {
                 return
             }
             if FileManager.default.fileExists(atPath: localURL.path),
-               let diskImage = UIImage(contentsOfFile: localURL.path) {
+               let diskImage = await Task.detached(priority: .utility, operation: { FeatureThumbnailDecoder.read(localURL) }).value {
+                guard !Task.isCancelled, categories.contains(where: { $0.id == category.id && $0.imageUrl == category.imageUrl }) else { return }
+                categoryImageSources[category.id] = category.imageUrl
                 categoryImageCache[category.id] = diskImage
                 return
             }
@@ -1823,9 +2123,15 @@ final class FeaturePatchService: ObservableObject {
             if !Task.isCancelled,
                categories.contains(where: { $0.id == category.id && $0.imageUrl == category.imageUrl }),
                let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode),
-               let image = UIImage(data: data) {
-                try data.write(to: localURL, options: .atomic)
+               let image = await Task.detached(priority: .utility, operation: { FeatureThumbnailDecoder.decode(data) }).value {
+                guard !Task.isCancelled, categories.contains(where: { $0.id == category.id && $0.imageUrl == category.imageUrl }) else { return }
+                let staging = localURL.deletingLastPathComponent().appendingPathComponent(".image-" + UUID().uuidString)
+                defer { Task.detached(priority: .utility) { try? FileManager.default.removeItem(at: staging) } }
+                try await Task.detached(priority: .utility) { try data.write(to: staging, options: .atomic) }.value
+                guard !Task.isCancelled, categories.contains(where: { $0.id == category.id && $0.imageUrl == category.imageUrl }) else { return }
+                try commitImageFile(staging, to: localURL)
                 defaults.set(category.imageUrl, forKey: "cat_img_url_\(category.id)")
+                categoryImageSources[category.id] = category.imageUrl
                 categoryImageCache[category.id] = image
                 print("[FeaturePatch] category image downloaded & cached: \(category.name) (ID: \(category.id))")
             }
@@ -1842,7 +2148,9 @@ final class FeaturePatchService: ObservableObject {
         let lastURL = defaults.string(forKey: "patch_img_url_\(patch.id)")
         if !force && lastURL == patch.imageUrl {
             if patchImageCache[patch.id] != nil { return }
-            if let diskImage = UIImage(contentsOfFile: localURL.path) {
+            if let diskImage = await Task.detached(priority: .utility, operation: { FeatureThumbnailDecoder.read(localURL) }).value {
+                guard !Task.isCancelled, patches.contains(where: { $0.id == patch.id && $0.imageUrl == patch.imageUrl }) else { return }
+                patchImageSources[patch.id] = patch.imageUrl
                 patchImageCache[patch.id] = diskImage
                 return
             }
@@ -1855,9 +2163,15 @@ final class FeaturePatchService: ObservableObject {
             guard !Task.isCancelled,
                   patches.contains(where: { $0.id == patch.id && $0.imageUrl == patch.imageUrl }),
                   let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode),
-                  let image = UIImage(data: data) else { return }
-            try data.write(to: localURL, options: .atomic)
+                  let image = await Task.detached(priority: .utility, operation: { FeatureThumbnailDecoder.decode(data) }).value else { return }
+            guard !Task.isCancelled, patches.contains(where: { $0.id == patch.id && $0.imageUrl == patch.imageUrl }) else { return }
+            let staging = localURL.deletingLastPathComponent().appendingPathComponent(".image-" + UUID().uuidString)
+            defer { Task.detached(priority: .utility) { try? FileManager.default.removeItem(at: staging) } }
+            try await Task.detached(priority: .utility) { try data.write(to: staging, options: .atomic) }.value
+            guard !Task.isCancelled, patches.contains(where: { $0.id == patch.id && $0.imageUrl == patch.imageUrl }) else { return }
+            try commitImageFile(staging, to: localURL)
             defaults.set(patch.imageUrl, forKey: "patch_img_url_\(patch.id)")
+            patchImageSources[patch.id] = patch.imageUrl
             patchImageCache[patch.id] = image
         } catch {
             // A decorative image failure must not invalidate the patch catalog.

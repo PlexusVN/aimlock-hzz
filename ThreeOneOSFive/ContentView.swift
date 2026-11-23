@@ -11,6 +11,7 @@ struct ContentView: View {
     @EnvironmentObject private var appState: AppState
     @EnvironmentObject private var updateManager: UpdateManager
     @State private var tabNavigation: AppTabNavigationState
+    @State private var mountedSections: Set<AppSection> = [.features]
     @State private var heartbeatTimer: Timer?
     @Environment(\.scenePhase) private var scenePhase
     @Namespace private var tabAnimationNamespace
@@ -56,6 +57,7 @@ struct ContentView: View {
         }
         .onAppear {
             tabNavigation.reconcileSelection(with: featureVisibility)
+            mountedSections.insert(selectedVisibleSection)
             startHeartbeat()
         }
         .onDisappear {
@@ -79,20 +81,7 @@ struct ContentView: View {
         ZStack(alignment: .bottom) {
             GamingBackdrop()
 
-            ZStack {
-                ForEach(featureVisibility.visibleSections) { section in
-                    let isSelected = section.rawValue == tabNavigation.selectedTab
-
-                    sectionContent(section)
-                        .opacity(isSelected ? 1 : 0)
-                        .allowsHitTesting(isSelected)
-                        .accessibilityHidden(!isSelected)
-                        .zIndex(isSelected ? 1 : 0)
-                }
-            }
-            // Chỉ cross-fade opacity. Blur/scale/offset trên toàn bộ ScrollView
-            // buộc GPU render lại nhiều lớp lớn và gây khựng khi đổi tab.
-            .animation(AppTheme.gamingContentFade, value: tabNavigation.selectedTab)
+            mountedTabContents
 
             customFloatingTabBar
                 .zIndex(10)
@@ -152,7 +141,6 @@ struct ContentView: View {
         .animation(AppTheme.gamingTabSpring, value: tabNavigation.selectedTab)
         .background(
             ZStack {
-                RoundedRectangle(cornerRadius: 14, style: .continuous).fill(.ultraThinMaterial)
                 RoundedRectangle(cornerRadius: 14, style: .continuous).fill(AppTheme.gamingSurface.opacity(0.96))
             }
         )
@@ -184,9 +172,7 @@ struct ContentView: View {
             List {
                 ForEach(featureVisibility.visibleSections) { section in
                     Button {
-                        withAnimation(.easeInOut(duration: 0.18)) {
-                            tabNavigation.select(section.rawValue)
-                        }
+                        selectTab(section.rawValue)
                     } label: {
                         Label {
                             Text(language.text(section.titleKey))
@@ -217,8 +203,7 @@ struct ContentView: View {
             .navigationTitle("Aimlock Hzz")
             .navigationSplitViewColumnWidth(min: 210, ideal: 240, max: 300)
         } detail: {
-            sectionContent(selectedVisibleSection)
-                .id(selectedVisibleSection.rawValue)
+            mountedTabContents
         }
         .navigationSplitViewStyle(.balanced)
     }
@@ -246,6 +231,21 @@ struct ContentView: View {
         case .profile:
             ProfileView(showSystemDashboard: $showSettings)
                 .environmentObject(authManager)
+        }
+    }
+
+    // Mount once on first visit and retain navigation/scroll state. Only the
+    // small tab indicator animates; full-screen scroll surfaces do not cross-fade.
+    private var mountedTabContents: some View {
+        ZStack {
+            ForEach(featureVisibility.visibleSections.filter { mountedSections.contains($0) }) { section in
+                let selected = section == selectedVisibleSection
+                sectionContent(section)
+                    .opacity(selected ? 1 : 0)
+                    .allowsHitTesting(selected)
+                    .accessibilityHidden(!selected)
+                    .zIndex(selected ? 1 : 0)
+            }
         }
     }
 
@@ -291,9 +291,9 @@ struct ContentView: View {
         }
 
         Haptics.selection()
-
-        // Hai animation đã được scope riêng cho content và indicator ở trên.
-        // Không dùng withAnimation toàn cục vì nó làm mọi ScrollView con cùng animate.
+        if let section = AppSection(rawValue: target), featureVisibility.isVisible(section) {
+            mountedSections.insert(section)
+        }
         tabNavigation.select(target)
     }
 }

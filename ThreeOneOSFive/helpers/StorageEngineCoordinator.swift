@@ -215,7 +215,7 @@ final class StorageEngineCoordinator: ObservableObject {
         if !allowOverlappingTargets {
             try store.requireNoUnbackedOverlap(projectID: project.id, targetKeys: targets, includingBackedApplications: true)
         }
-        let occupied = try DevicePatchService.activeTargetKeys()
+        let occupied = allowOverlappingTargets ? Set<String>() : try DevicePatchService.activeTargetKeys()
         guard allowOverlappingTargets || !targets.contains(where: { target in occupied.contains(where: {
             target == $0 || target.hasPrefix($0 + "/") || $0.hasPrefix(target + "/")
         }) }) else { throw PatchEngineStateError.recoveryRequired }

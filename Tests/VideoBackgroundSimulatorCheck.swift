@@ -142,6 +142,18 @@ final class VideoDriver {
     }
 
     private func run() async throws {
+        let format = UIGraphicsImageRendererFormat()
+        format.scale = 1
+        let thumbnailInput = UIGraphicsImageRenderer(size: CGSize(width: 2048, height: 1024), format: format).image { context in
+            context.cgContext.setFillColor(UIColor.red.cgColor)
+            context.cgContext.fill(CGRect(x: 0, y: 0, width: 2048, height: 1024))
+        }.pngData()!
+        let thumbnailOK = await Task.detached(priority: .utility) {
+            guard !Thread.isMainThread,
+                  let image = FeatureThumbnailDecoder.decode(thumbnailInput)?.cgImage else { return false }
+            return image.width == 256 && image.height == 128 && FeatureThumbnailDecoder.decode(Data([0])) == nil
+        }.value
+        try require(thumbnailOK, "Production thumbnail decoder must prepare 256-pixel images off the UI thread")
         try await wait("login begins decoding", seconds: 15) { (frames["login-backgroud"] ?? 0) > 4 }
         try await capture("login-start")
         try await wait("first login loop before encoded black tail", seconds: 16) { (wraps["login-backgroud"] ?? 0) >= 1 }

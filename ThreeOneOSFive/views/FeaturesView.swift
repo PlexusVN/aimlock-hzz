@@ -17,6 +17,7 @@ struct FeaturesView: View {
     @EnvironmentObject private var authManager: AuthManager
     @ObservedObject private var protectedDownloads = ProtectedDownloadService.shared
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.scenePhase) private var scenePhase
     @State private var selectedCategoryID: Int?
     @State private var showCategoryPicker = false
     @State private var activeToast: ToastInfo?
@@ -26,7 +27,7 @@ struct FeaturesView: View {
     @State private var pendingRestore: FeatureRestoreReview?
 
     private var actionsBlocked: Bool {
-        workingActionID != nil || service.patchOperationInProgress || pendingRestore != nil
+        workingActionID != nil || service.patchOperationInProgress || pendingRestore != nil || !service.presentationReady
     }
 
     var body: some View {
@@ -85,6 +86,9 @@ struct FeaturesView: View {
                 }
                 service.preloadCategoryImages()
             })
+            .onChange(of: scenePhase) { phase in
+                if phase == .active { service.refreshRecoveryItems() }
+            }
         }
         .glassToast(toast: $activeToast)
         .sheet(item: $pendingRestore) { review in
@@ -216,18 +220,8 @@ struct FeaturesView: View {
     private func categoryArtwork(_ category: PatchCategory, size: CGFloat) -> some View {
         ZStack {
             AppTheme.gamingSurfaceRaised
-            if let uiImage = service.categoryImage(for: category.id) {
+            if let uiImage = service.displayCategoryImage(for: category.id) {
                 Image(uiImage: uiImage).resizable().scaledToFill()
-            } else if !category.imageUrl.isEmpty, let url = URL(string: category.imageUrl) {
-                AsyncImage(url: url) { phase in
-                    switch phase {
-                    case .success(let image): image.resizable().scaledToFill()
-                    default:
-                        Image(systemName: category.icon.isEmpty ? "gamecontroller.fill" : category.icon)
-                            .font(.system(size: size * 0.43, weight: .semibold))
-                            .foregroundStyle(AppTheme.gamingText)
-                    }
-                }
             } else {
                 Image(systemName: category.icon.isEmpty ? "gamecontroller.fill" : category.icon)
                     .font(.system(size: size * 0.43, weight: .semibold))
@@ -395,7 +389,7 @@ struct FeaturesView: View {
     // card, but it cannot recreate an enabled button while its write is active.
     private func togglePatch(_ patch: PatchItem) {
         guard !actionsBlocked else { return }
-        if service.isPatchEnabled(patch) {
+        if service.presentation(for: patch).enabled {
             beginRestore(.patch(patch))
             return
         }
@@ -672,8 +666,9 @@ struct PatchCardView: View {
         guard service.patchOperation?.identity == "patch:\(patch.downloadIdentity)" else { return nil }
         return service.patchOperation
     }
-    private var applicationState: PatchApplicationState { service.patchApplicationState(patch) }
-    private var isEnabled: Bool { service.isPatchEnabled(patch) }
+    private var presentation: CatalogFeaturePresentation { service.presentation(for: patch) }
+    private var applicationState: PatchApplicationState { presentation.state }
+    private var isEnabled: Bool { presentation.enabled }
     private var needsRecovery: Bool { applicationState.requiresRestore && !isEnabled }
 
     private var stateColor: Color {
@@ -742,7 +737,7 @@ struct PatchCardView: View {
     private var patchImage: some View {
         ZStack(alignment: .bottomTrailing) {
             Group {
-                if let uiImage = service.cachedImage(for: patch) {
+                if let uiImage = service.displayPatchImage(for: patch) {
                     Image(uiImage: uiImage).resizable().scaledToFill()
                 } else {
                     ZStack {

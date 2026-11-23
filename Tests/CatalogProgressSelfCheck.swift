@@ -19,6 +19,8 @@ actor WorkerBoundary {
 }
 
 @MainActor final class FeaturePatchService {
+    let independentCatalogToggles = false
+    private func suspendPresentationRefresh() {}
     var patchOperation: FeaturePatchOperationProgress? {
         didSet { if let patchOperation { observedStages.append(patchOperation.stage) } }
     }

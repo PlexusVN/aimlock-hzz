@@ -537,6 +537,16 @@ enum ContainerStore {
                 allowOverlappingTargets: true, containerResolver: { _ in game })
             let b = try PatchTransaction.apply(project: project(2), backupRoot: backup,
                 allowOverlappingTargets: true, containerResolver: { _ in game })
+            let suite = "snapshot-fs-" + UUID().uuidString, preferences = UserDefaults(suiteName: suite)!
+            defer { preferences.removePersistentDomain(forName: suite) }
+            preferences.set(a.projectID.uuidString, forKey: "patch_applied_catalog_1_generic_projectID")
+            preferences.set(b.projectID.uuidString, forKey: "patch_applied_catalog_2_generic_projectID")
+            let targets = [CatalogPresentationTarget(key: "a", identity: "catalog_1_generic", legacyIdentity: "old_a"),
+                           CatalogPresentationTarget(key: "b", identity: "catalog_2_generic", legacyIdentity: "old_b")]
+            func snapshot() throws -> CatalogPresentationSnapshot {
+                try CatalogPresentationReader.load(root: backup, defaults: preferences, targets: targets, overrides: .init())
+            }
+            try check(try snapshot().cards.values.allSatisfy(\.enabled), "display snapshot must read actual applied journals")
             try check(try Data(contentsOf: file) == Data([2]), "later feature must overwrite the same file")
             var broken = project(3)
             broken.rules.append(PatchRule(bundleID: "com.fixture.game", relativePath: "Documents/failing",
@@ -552,9 +562,12 @@ enum ContainerStore {
             try check(try Data(contentsOf: file) == Data([2]), "turning earlier feature OFF must preserve later writer")
             try check(!fm.fileExists(atPath: game.appendingPathComponent("Documents/only-a").path), "OFF must restore its own non-overlapping targets")
             try check(PatchTransaction.latestRecordedApplicationState(projectID: first.id, backupRoot: backup) == .off, "earlier feature must turn OFF")
+            let afterA = try snapshot()
+            try check(afterA.cards["a"]?.enabled == false && afterA.cards["b"]?.enabled == true, "display must retain independent toggle states")
             try PatchTransaction.restore(receipt: b, allowChangedTargets: true, preserveLaterPatches: true,
                 containerResolver: { _ in game })
             try check(try Data(contentsOf: file) == Data([1]), "OFF restores the latest feature's own pre-activation snapshot")
+            try check(try snapshot().cards.values.allSatisfy { !$0.enabled && $0.state == .off }, "display must read actual restored journals")
         }
         print("Direct filesystem recovery: \(checks) checks passed")
     }

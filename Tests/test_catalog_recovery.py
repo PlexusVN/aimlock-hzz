@@ -43,6 +43,7 @@ def production_sources():
     source = (ROOT / 'ThreeOneOSFive/helpers/FeaturePatchService.swift').read_text(encoding='utf-8')
     transaction = (ROOT / 'ThreeOneOSFive/helpers/PatchTransaction.swift').read_text(encoding='utf-8')
     code = 'import Foundation\n'
+    code += extract_function(source, 'struct CatalogFeaturePresentation:') + '\n'
     executor = (ROOT / 'ThreeOneOSFive/helpers/DirectPatchExecutor.swift').read_text(encoding='utf-8')
     code += executor.split('// BEGIN READ-ONLY PATCH PREPARATION', 1)[1].split('// END READ-ONLY PATCH PREPARATION', 1)[0]
     code += source.split('// BEGIN CATALOG OPERATION PROGRESS', 1)[1].split('// END CATALOG OPERATION PROGRESS', 1)[0].split('\n', 1)[1]
@@ -67,6 +68,12 @@ var patchProjectsDir:URL { Fixture.root }
 var applicationRevision:UInt64=0
 var recoveryItems:[PatchRecoveryItem]=[]
 var recoveryInventoryError:String?
+func requestPresentationRefresh() {}
+func updateDisplayedIntent(_ enabled:Bool, identity:String) {}
+func suspendPresentationRefresh() {}
+func presentation(for patch:PatchItem)->CatalogFeaturePresentation {
+    CatalogFeaturePresentation(state:patchApplicationState(patch),enabled:isPatchEnabled(patch))
+}
 var patchOperationInProgress=false
 var patchOperation:FeaturePatchOperationProgress?
 private var cancelCatalogOperation:(()->Void)?

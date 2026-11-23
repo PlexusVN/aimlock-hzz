@@ -5,6 +5,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from check_airlift_pairing_finish import extract_function
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -20,7 +21,11 @@ def production_sources():
     transaction = (ROOT / 'ThreeOneOSFive/helpers/PatchTransaction.swift').read_text(encoding='utf-8')
     transaction = transaction[:transaction.index('// MARK: - Device Patch Service')]
     executor = (ROOT / 'ThreeOneOSFive/helpers/DirectPatchExecutor.swift').read_text(encoding='utf-8')
-    return models + '\n' + transaction + '\n' + executor
+    feature = (ROOT / 'ThreeOneOSFive/helpers/FeaturePatchService.swift').read_text(encoding='utf-8')
+    presentation = extract_function(feature, 'struct PatchRecoveryItem:') + '\n'
+    presentation += extract_function(feature, 'private struct CatalogRecoveryMetadata:') + '\n'
+    presentation += feature.split('// BEGIN CATALOG PRESENTATION SNAPSHOT', 1)[1].split('// END CATALOG PRESENTATION SNAPSHOT', 1)[0]
+    return models + '\n' + transaction + '\n' + executor + '\n' + presentation
 
 
 class DirectFilesystemRecovery(unittest.TestCase):

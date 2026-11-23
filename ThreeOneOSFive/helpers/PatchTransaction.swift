@@ -389,6 +389,8 @@ struct CatalogPatchApplicationRegistry {
         guard legacy != stable else { return }
         let oldID = projectID(for: legacy), currentID = projectID(for: stable)
         guard currentID == nil || currentID == oldID else { return }
+        guard oldID != nil || defaults.bool(forKey: prefix + legacy)
+                || defaults.bool(forKey: prefix + legacy + "_recovery") else { return }
         if let oldID { associate(oldID, with: stable) }
         for suffix in ["", "_recovery"] where defaults.bool(forKey: prefix + legacy + suffix) {
             defaults.set(true, forKey: prefix + stable + suffix)
@@ -797,7 +799,7 @@ enum PatchTransaction {
             resolvedRules.append(ResolvedRule(rule: rule, containerRoot: root, target: target))
         }
 
-        let occupied = appliedTargetKeys(
+        let occupied = allowOverlappingTargets ? Set<String>() : appliedTargetKeys(
             backupRoot: backupRoot,
             excludingProjectID: project.id,
             fileManager: fileManager

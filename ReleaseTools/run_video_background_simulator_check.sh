@@ -27,6 +27,9 @@ start = design.index('// NavigationStack can retain an opaque UIKit hosting/tran
 end = design.index('struct GamingPressButtonStyle:', start)
 (work/'ActualNavigationSurface.swift').write_text('import SwiftUI\nimport UIKit\n'+design[start:end])
 shutil.copyfile(root/'ThreeOneOSFive/views/VideoBackground.swift', work/'ActualVideoBackground.swift')
+feature = (root/'ThreeOneOSFive/helpers/FeaturePatchService.swift').read_text()
+thumbnail = feature.split('// BEGIN FEATURE THUMBNAIL DECODER',1)[1].split('// END FEATURE THUMBNAIL DECODER',1)[0]
+(work/'ActualThumbnailDecoder.swift').write_text('import Foundation\nimport UIKit\nimport ImageIO\n'+thumbnail)
 for source in (root/'ThreeOneOSFive/Resources/Backgrounds').iterdir():
     if source.suffix in {'.mp4', '.png'}: shutil.copyfile(source, app/'Backgrounds'/source.name)
 info = {'CFBundleIdentifier':'site.aimlockhzz.VideoBackgroundCheck', 'CFBundleExecutable':'NativeVideoCheck',
@@ -36,6 +39,7 @@ info = {'CFBundleIdentifier':'site.aimlockhzz.VideoBackgroundCheck', 'CFBundleEx
         'UISupportedInterfaceOrientations':['UIInterfaceOrientationPortrait'], 'UILaunchScreen':{}}
 (app/'Info.plist').write_bytes(plistlib.dumps(info))
 evidence={'production_video_sha256':hashlib.sha256((work/'ActualVideoBackground.swift').read_bytes()).hexdigest(),
+          'production_thumbnail_decoder_sha256':hashlib.sha256(thumbnail.encode()).hexdigest(),
           'production_navigation_helper_sha256':hashlib.sha256(design[start:end].encode()).hexdigest(),
           'scope':'Copied production player source and exact navigation helper; AppTheme color is the only visual dependency stub.'}
 (work/'source-evidence.json').write_text(json.dumps(evidence,indent=2))
@@ -44,7 +48,7 @@ ARCH="$(uname -m)"
 SDK="$(xcrun --sdk iphonesimulator --show-sdk-path)"
 xcrun --sdk iphonesimulator swiftc -swift-version 5 -parse-as-library \
   -target "$ARCH-apple-ios16.0-simulator" -sdk "$SDK" \
-  "$WORK/ActualVideoBackground.swift" "$WORK/ActualNavigationSurface.swift" \
+  "$WORK/ActualVideoBackground.swift" "$WORK/ActualNavigationSurface.swift" "$WORK/ActualThumbnailDecoder.swift" \
   "$ROOT/Tests/VideoBackgroundSimulatorCheck.swift" -o "$APP/NativeVideoCheck"
 codesign --force --sign - "$APP"
 RUNTIME="$(xcrun simctl list runtimes available -j | python3 -c 'import json,sys; a=[x for x in json.load(sys.stdin)["runtimes"] if x.get("isAvailable") and x["identifier"].startswith("com.apple.CoreSimulator.SimRuntime.iOS-")]; assert a,"No iOS simulator runtime"; print(sorted(a,key=lambda x:tuple(map(int,x["version"].split("."))))[-1]["identifier"])')"
