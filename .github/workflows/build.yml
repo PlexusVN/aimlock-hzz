@@ -42,7 +42,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: Aimlock-Hzz-Native-Video-Check-2.4-53
+          name: Aimlock-Hzz-Native-Video-Check-2.4-54
           path: ${{ runner.temp }}/aimlock-video-native-check/
           if-no-files-found: ignore
 
@@ -181,7 +181,7 @@ jobs:
           test -d "$APP_NAME"
           test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleDisplayName' "$APP_NAME/Info.plist")" = "Aimlock Hzz"
           test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$APP_NAME/Info.plist")" = "2.4"
-          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$APP_NAME/Info.plist")" = "53"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$APP_NAME/Info.plist")" = "54"
           python3 - "$APP_NAME" <<'PY'
           from pathlib import Path
           import hashlib, sys
@@ -239,5 +239,5 @@ jobs:
       - name: Upload IPA Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: Aimlock-Hzz-Unsigned-IPA-2.4-53
+          name: Aimlock-Hzz-Unsigned-IPA-2.4-54
           path: build/Aimlock-Hzz.ipa

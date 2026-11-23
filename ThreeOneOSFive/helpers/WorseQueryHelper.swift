@@ -292,7 +292,16 @@ public final class WorseQueryHelper {
         let major = ProcessInfo.processInfo.operatingSystemVersion.majorVersion
         let altFlags = (major == 26 && effectiveTarget.contains("/var/mobile/Containers/Shared/AppGroup"))
 
-        let handle = worse_query(effectiveTarget, group, altFlags, createDir)
+        let handle: Int64
+        if ExploitSupportPolicy.currentUsesViet99BQCore {
+            guard containerRoot(for: canonical) == effectiveTarget,
+                  effectiveTarget.hasPrefix("/private/var/mobile/Containers/Data/Application/") else {
+                throw WorseQueryError.invalidPath(targetPath)
+            }
+            handle = ITechBQAcquireAccess(effectiveTarget, group)
+        } else {
+            handle = worse_query(effectiveTarget, group, altFlags, createDir)
+        }
         if handle >= 0 {
             return handle
         }
@@ -315,6 +324,8 @@ public final class WorseQueryHelper {
             throw WorseQueryError.extensionConsumptionFailed
         case -8:
             throw WorseQueryError.nativeException
+        case -10:
+            throw WorseQueryError.invalidPath(effectiveTarget)
         case -255:
             throw WorseQueryError.targetNotFound(effectiveTarget)
         default:

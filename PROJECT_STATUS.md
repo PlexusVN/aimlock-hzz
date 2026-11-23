@@ -1,3 +1,7 @@
+## Build 2.4 (54): Luồng quyền patch/restore theo iTech
+
+Ghép scoped Viet99/BQCore từ iTech cho nhánh ứng viên 27.2.1–27.3.x. Giữ 3105/WQ hiện có, xác minh container trước commit và handle dùng chung apply/restore. Giao diện, bảo mật, server và payload targets không đổi. Chi tiết tại docs/ITECH_PATCH_SYNC_20261124.md.
+
 ## Build 2.4 (53): Đối chiếu Astra và ràng buộc lịch sử restore
 
 Đối chiếu lõi patch, executor, định danh, TLS, crypto và session với source Astra người dùng chỉ định. Giữ các cải tiến Aimlock và contract generic hiện tại. Truy baseline chỉ nhận record cùng container fingerprint, bỏ giao dịch rolledBack và ngắt lineage khi có payload xen giữa không khớp. Thêm regression container cũ/mới cùng bytes. Xem docs/ASTRA_SYNC_20261124.md.

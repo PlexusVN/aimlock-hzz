@@ -46,6 +46,9 @@ func worse_query(_ path: String, _ group: String, _ alt: Bool, _ create: Bool) -
     return NativeFixture.result
 }
 func worse_query_release(_ handle: Int64) { NativeFixture.released.append(handle) }
+func ITechBQAcquireAccess(_ path: String, _ group: String) -> Int64 {
+    worse_query(path, group, false, false)
+}
 func worse_query_preflight(_ group: String) -> Bool {
     NativeFixture.preflightGroups.append(group)
     return NativeFixture.preflightReady && group == "group.esign.rewritten"

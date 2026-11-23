@@ -1,5 +1,6 @@
 #import "exploit/bad_query.h"
 #import "exploit/worse_query.h"
+#import "exploit/Viet99BQCore.h"
 #import "exploit/pathleak.h"
 #import "exploit/mcm_bridge.h"
 #import "kexploit/kexploit_opa334.h"
