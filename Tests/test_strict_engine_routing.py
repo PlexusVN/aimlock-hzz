@@ -24,6 +24,10 @@ class StrictEngineRouting(unittest.TestCase):
         self.assertNotIn('canUseAirLift', preparation)
         restore = extract_function((HELPERS / 'FeaturePatchService.swift').read_text(encoding='utf-8'), 'func restorePatch(')
         self.assertNotIn('AppInfo.versionTuple.major >= 27', restore)
+        airlift = restore.split('if independentCatalogToggles && StorageEngineCoordinator.shared.isAirLiftActive', 1)[1].split('if let confirmation', 1)[0]
+        self.assertIn('setRequestedEnabled(true', airlift)
+        self.assertIn('throw PatchRestoreError.airLiftRestoreUnsupported', airlift)
+        self.assertNotIn('setRequestedEnabled(false', airlift)
 
     def test_actual_production_container_resolver_and_grant_routing(self):
         native = shutil.which('swiftc')

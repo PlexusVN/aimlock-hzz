@@ -1328,8 +1328,11 @@ final class FeaturePatchService: ObservableObject {
     func restorePatch(_ patch: PatchItem, auth: AuthManager, confirmation: PatchRestoreConfirmation? = nil) async throws {
         if independentCatalogToggles && StorageEngineCoordinator.shared.isAirLiftActive {
             guard auth.authState == .verified, patchOperation == nil else { throw FeaturePatchError.notAuthenticated }
-            setRequestedEnabled(false, identity: patchStorageSlug(patch))
-            return
+            // The current AirLift ABI can write but cannot remove a remote
+            // target or read it back for a trustworthy baseline. Never publish
+            // a false OFF state while the injected bytes are still present.
+            setRequestedEnabled(true, identity: patchStorageSlug(patch))
+            throw PatchRestoreError.airLiftRestoreUnsupported
         }
         if let confirmation, confirmation.authRevision != auth.authenticationRevision {
             throw PatchRestoreError.confirmationExpired

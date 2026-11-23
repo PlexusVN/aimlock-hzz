@@ -614,6 +614,16 @@ enum PatchTransaction {
         let target: URL
     }
 
+    private enum RestoreBaseline {
+        case missing
+        case file(URL, digest: Data)
+    }
+
+    private struct HistoricalJournal {
+        let journal: Journal
+        let transactionDirectory: URL
+    }
+
     private struct CurrentFileSnapshot {
         let target: URL
         let existed: Bool
@@ -1067,6 +1077,14 @@ enum PatchTransaction {
                 }
                 resolved.removeAll { newer.contains($0.record.bundleID + "\0" + $0.record.relativePath) }
             }
+            let restoreBaselines = try effectiveRestoreBaselines(
+                for: resolved,
+                currentJournal: journal,
+                transactionDirectory: transactionDirectory,
+                backupRoot: backupRoot,
+                collapseRestoredPatchLayers: preserveLaterPatches,
+                fileManager: fileManager
+            )
             let changes = try restoreChanges(in: resolved, prepared: journal.status == .prepared, fileManager: fileManager)
             if let expectedCurrentState,
                try currentStateSnapshot(receipt: receipt, resolved: resolved, fileManager: fileManager) != expectedCurrentState {
@@ -1101,17 +1119,20 @@ enum PatchTransaction {
                         throw PatchPackageError.restoreTargetsChanged([item.record.bundleID + "/" + item.record.relativePath])
                     }
                     willMutate(item.target)
-                    if item.record.originalExisted {
-                        let backup = transactionDirectory.appendingPathComponent(
-                            item.record.backupFilename!
-                        )
+                    guard let baseline = restoreBaselines[item.target.path] else {
+                        throw PatchPackageError.restoreFailed
+                    }
+                    switch baseline {
+                    case .file(let backup, _):
                         try atomicCopy(backup, to: item.target, fileManager: fileManager)
-                    } else if try targetExists(item.target, fileManager: fileManager) {
-                        try removeTarget(item.target, fileManager: fileManager)
+                    case .missing:
+                        if try targetExists(item.target, fileManager: fileManager) {
+                            try removeTarget(item.target, fileManager: fileManager)
+                        }
                     }
                 }
                 try beforeRestoreVerification?()
-                try verifyRestoredRecords(resolved)
+                try verifyRestoredRecords(resolved, baselines: restoreBaselines)
                 try DirectPatchExecutionContext.check()
                 try targetFilesystem?.validateBindings()
                 journal.status = .restored
@@ -1440,6 +1461,92 @@ enum PatchTransaction {
         return journal
     }
 
+    /// Independent catalog patches may overwrite the same target. A later
+    /// transaction therefore captures the earlier patch bytes as its immediate
+    /// baseline. If that earlier patch has since been switched OFF, restoring
+    /// the later transaction must continue through the provenance chain instead
+    /// of resurrecting bytes which no active patch owns. Digest matching makes
+    /// each hop explicit; unrelated historical writes are never adopted.
+    private static func effectiveRestoreBaselines(
+        for resolved: [ResolvedRecord],
+        currentJournal: Journal,
+        transactionDirectory: URL,
+        backupRoot: URL,
+        collapseRestoredPatchLayers: Bool,
+        fileManager: FileManager
+    ) throws -> [String: RestoreBaseline] {
+        var baselines: [String: RestoreBaseline] = [:]
+        for item in resolved {
+            if item.record.originalExisted {
+                guard let filename = item.record.backupFilename,
+                      let expected = item.record.originalDigest else {
+                    throw PatchPackageError.restoreFailed
+                }
+                let backup = transactionDirectory.appendingPathComponent(filename)
+                guard fileManager.fileExists(atPath: backup.path),
+                      try digestFile(backup) == expected else {
+                    throw PatchPackageError.restoreFailed
+                }
+                baselines[item.target.path] = .file(backup, digest: expected)
+            } else {
+                baselines[item.target.path] = .missing
+            }
+        }
+        guard collapseRestoredPatchLayers, !resolved.isEmpty else { return baselines }
+
+        let projectDirectories = try fileManager.contentsOfDirectory(
+            at: backupRoot,
+            includingPropertiesForKeys: [.isDirectoryKey],
+            options: [.skipsHiddenFiles]
+        )
+        var history: [HistoricalJournal] = []
+        for directory in projectDirectories {
+            guard let projectID = UUID(uuidString: directory.lastPathComponent),
+                  projectID != currentJournal.projectID,
+                  let receipt = latestReceipt(projectID: projectID, backupRoot: backupRoot, fileManager: fileManager),
+                  let prior = try? readJournal(receipt.journalURL),
+                  prior.createdAt < currentJournal.createdAt else { continue }
+            history.append(HistoricalJournal(
+                journal: prior,
+                transactionDirectory: receipt.journalURL.deletingLastPathComponent()
+            ))
+        }
+        history.sort { $0.journal.createdAt > $1.journal.createdAt }
+
+        for item in resolved {
+            let key = item.record.bundleID + "\0" + item.record.relativePath
+            guard case .file(_, let initialDigest)? = baselines[item.target.path] else { continue }
+            var chainedDigest = initialDigest
+            for prior in history {
+                guard let record = prior.journal.records.first(where: {
+                    $0.bundleID + "\0" + $0.relativePath == key && $0.replacementDigest == chainedDigest
+                }) else { continue }
+
+                // An active earlier writer still owns these bytes, so the
+                // immediate baseline is the correct result for this target.
+                if prior.journal.status == .applied || prior.journal.status == .prepared { break }
+
+                if record.originalExisted {
+                    guard let filename = record.backupFilename,
+                          let expected = record.originalDigest else {
+                        throw PatchPackageError.restoreFailed
+                    }
+                    let backup = prior.transactionDirectory.appendingPathComponent(filename)
+                    guard fileManager.fileExists(atPath: backup.path),
+                          try digestFile(backup) == expected else {
+                        throw PatchPackageError.restoreFailed
+                    }
+                    baselines[item.target.path] = .file(backup, digest: expected)
+                    chainedDigest = expected
+                } else {
+                    baselines[item.target.path] = .missing
+                    break
+                }
+            }
+        }
+        return baselines
+    }
+
     private static func resolvedRoots(
         journal: Journal,
         containerResolver: (String) throws -> URL
@@ -1660,6 +1767,34 @@ enum PatchTransaction {
             } else {
                 // Only an actual ENOENT from the anchored stat proves removal;
                 // permission or other lookup errors never become OFF.
+                guard metadata == nil else { throw PatchPackageError.restoreFailed }
+            }
+        }
+    }
+
+    private static func verifyRestoredRecords(
+        _ resolved: [ResolvedRecord],
+        baselines: [String: RestoreBaseline]
+    ) throws {
+        for item in resolved {
+            guard let baseline = baselines[item.target.path] else { throw PatchPackageError.restoreFailed }
+            let metadata: stat?
+            if let filesystem = targetFilesystem, filesystem.owns(item.target) {
+                metadata = try filesystem.statItem(item.target)
+            } else {
+                var value = stat()
+                let result = lstat(item.target.path, &value)
+                if result == 0 { metadata = value }
+                else if errno == ENOENT { metadata = nil }
+                else { throw posixFailure() }
+            }
+            switch baseline {
+            case .file(_, let expected):
+                guard let metadata, metadata.st_mode & mode_t(S_IFMT) == mode_t(S_IFREG),
+                      try fileOperation("restore-target-readback", { try digestFile(item.target) }) == expected else {
+                    throw PatchPackageError.restoreFailed
+                }
+            case .missing:
                 guard metadata == nil else { throw PatchPackageError.restoreFailed }
             }
         }

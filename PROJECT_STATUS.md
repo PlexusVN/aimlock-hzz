@@ -1,3 +1,11 @@
+## Build 2.4 (52): Xóa đúng file do chuỗi patch tạo mới
+
+- Restore trực tiếp giờ lần theo chuỗi nguồn gốc của từng file khi nhiều chức năng ghi cùng đường dẫn.
+- Nếu các lớp patch trước đã tắt, restore không hồi sinh lại dữ liệu của chúng; khi file không tồn tại trước chuỗi patch, tắt chức năng cuối cùng sẽ xóa file và xác minh `ENOENT` trước khi ghi trạng thái OFF.
+- Patch bật trước vẫn có thể tắt độc lập mà không làm mất dữ liệu của patch bật sau còn hoạt động.
+- AirLift hiện không có ABI xóa/đọc file từ xa, vì vậy app không còn hiển thị OFF giả khi dữ liệu vẫn còn; thao tác tắt sẽ giữ trạng thái ON và báo không hỗ trợ restore.
+- Bổ sung hồi quy cho cả baseline có file sẵn và baseline không có file.
+
 ## Build 2.4 (51): Giảm giật khi bật chức năng và chuyển tab
 
 Thẻ chức năng đọc snapshot trong bộ nhớ, không mở journal/metadata/ảnh từ body. Worker nền đọc mỗi project một lần, gom các yêu cầu refresh, ưu tiên công tắc hiện tại trước lịch sử cũ và bỏ kết quả cũ bằng generation. Dừng quét hiển thị khi bắt đầu giao dịch; nhật ký và quyền ghi thực tế vẫn được kiểm tra ở đường thao tác, cache không cấp quyền. Intent OFF/commit ON cập nhật hiển thị ngay. Chỉ cập nhật metadata của activation hiện tại và bỏ quét occupancy khi overlap đã được cho phép. Ảnh vẫn từ URL server, giải mã thumbnail tối đa 256px và staging trên worker, commit cache sau kiểm tra URL/hủy để không nhận ảnh cũ. Tab mở lần đầu khi chọn, giữ navigation/scroll khi quay lại, bỏ cross-fade toàn màn hình và material dưới tab bar; giữ video gốc. Catalog và guides decode nền. Thêm kiểm tra 10.000 lượt đọc hiển thị không đọc journal, coalescing, early publication, stale-result rejection, đối chiếu journal thật và decoder UIKit/ImageIO trên simulator. Chưa đo FPS trên các iPhone người dùng phản ánh.

@@ -52,7 +52,7 @@ struct FixturePublisher { func send() {} }
 }
 enum FeaturePatchError:Error { case notAuthenticated, operationInProgress }
 struct PatchOperationError:Error { let underlying:Error }
-enum PatchRestoreError:Error { case missingReceipt, confirmationExpired, recoveryRequired }
+enum PatchRestoreError:Error { case missingReceipt, confirmationExpired, recoveryRequired, airLiftRestoreUnsupported }
 struct PatchItem {
     let identity:String; var id:Int=1; var artifactVariant:String?="ffth"
     var downloadIdentity:String { "\(id):\(artifactVariant ?? "legacy")" }

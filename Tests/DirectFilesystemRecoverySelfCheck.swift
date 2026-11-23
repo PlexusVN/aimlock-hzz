@@ -566,8 +566,27 @@ enum ContainerStore {
             try check(afterA.cards["a"]?.enabled == false && afterA.cards["b"]?.enabled == true, "display must retain independent toggle states")
             try PatchTransaction.restore(receipt: b, allowChangedTargets: true, preserveLaterPatches: true,
                 containerResolver: { _ in game })
-            try check(try Data(contentsOf: file) == Data([1]), "OFF restores the latest feature's own pre-activation snapshot")
+            try check(try Data(contentsOf: file) == Data([0]), "all overlapping features OFF must restore the true pre-chain baseline")
             try check(try snapshot().cards.values.allSatisfy { !$0.enabled && $0.state == .off }, "display must read actual restored journals")
+        }
+        do {
+            let (game, backup) = try fixture("independent-introduced-file")
+            let file = game.appendingPathComponent("Documents/introduced-shared")
+            func introducedProject(_ byte: UInt8) -> PatchProject {
+                PatchProject(name: "Introduced", rules: [PatchRule(bundleID: "com.fixture.game",
+                    relativePath: "Documents/introduced-shared", replacementFilename: "introduced-shared",
+                    replacementData: Data([byte]))])
+            }
+            let first = try PatchTransaction.apply(project: introducedProject(1), backupRoot: backup,
+                allowOverlappingTargets: true, containerResolver: { _ in game })
+            let second = try PatchTransaction.apply(project: introducedProject(2), backupRoot: backup,
+                allowOverlappingTargets: true, containerResolver: { _ in game })
+            try PatchTransaction.restore(receipt: first, allowChangedTargets: true, preserveLaterPatches: true,
+                containerResolver: { _ in game })
+            try check(try Data(contentsOf: file) == Data([2]), "earlier OFF preserves the later introduced writer")
+            try PatchTransaction.restore(receipt: second, allowChangedTargets: true, preserveLaterPatches: true,
+                containerResolver: { _ in game })
+            try check(!fm.fileExists(atPath: file.path), "all independent writers OFF must remove a file absent before the chain")
         }
         print("Direct filesystem recovery: \(checks) checks passed")
     }

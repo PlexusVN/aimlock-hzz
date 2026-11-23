@@ -2,7 +2,7 @@ import Foundation
 
 enum FeaturePatchError: Error { case notAuthenticated, operationInProgress }
 enum PatchEngineStateError: Error { case operationNotHeld }
-enum PatchRestoreError: Error { case confirmationExpired }
+enum PatchRestoreError: Error { case confirmationExpired, airLiftRestoreUnsupported }
 struct PatchItem { let downloadIdentity = "fixture" }
 struct PatchRestoreConfirmation { let authRevision: UInt64 = 1 }
 struct PatchOperationError: Error { let underlying: Error }
